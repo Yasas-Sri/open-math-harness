@@ -409,10 +409,10 @@ pub(super) fn report_text(swarm: &str, member: &str, direction: &str, request: &
             request.paths.join(", ")
         ));
     }
-    text.push_str(
-        "Check them and give your verdict with ultramath_verdict; ultramath_status and ultramath_records show the board \
-         and the swarm's records.",
-    );
+    text.push_str(&format!(
+        "Check them and give your verdict with ultramath_verdict (swarm {swarm}, member {member}); ultramath_status \
+         and ultramath_records with swarm {swarm} show its board and records."
+    ));
     text
 }
 

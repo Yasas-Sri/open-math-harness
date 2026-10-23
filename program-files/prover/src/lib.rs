@@ -124,7 +124,7 @@ impl Options {
     /// Parses `--model <id> --out <dir>
     /// [--max-attempts <n>] [--max-output-tokens <n>] [--model-deadline-ms <n>]
     /// [--verify-deadline-ms <n>] [--lean-endpoint <name>]
-    /// [--explore-endpoint <name>] [--reasoning-effort off|on|low|medium|high|max]
+    /// [--explore-endpoint <name>] [--reasoning-effort off|on|low|medium|high|max|xhigh]
     /// [--temperature <0..2>] [--shell-endpoint <name>] [--bash-timeout-ms <n>]
     /// [--compact-at-tokens <n>] [--model-retries <n>] [--model-retry-backoff-ms <n>]
     /// [--stall-ms <n>] [--project <name>]`.
@@ -192,7 +192,7 @@ impl Options {
                 }
                 "--reasoning-effort" => {
                     options.reasoning_effort = Some(ReasoningEffort::parse(&value).ok_or_else(|| {
-                        "--reasoning-effort must be off, on, low, medium, high or max".to_owned()
+                        "--reasoning-effort must be off, on, low, medium, high, max or xhigh".to_owned()
                     })?);
                 }
                 _ => return Err(format!("unknown option {flag}")),

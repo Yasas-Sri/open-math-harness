@@ -3,6 +3,9 @@
 //! Every path is resolved beneath the working directory with no link
 //! followed, and the last component is acted on through its opened parent,
 //! never by name from the root again.
+//! Listings obtain an entry's metadata together with its optional birth time
+//! in one no-follow statx observation. If statx is unavailable, the ordinary
+//! stat observation still lists it, without inventing a creation time.
 
 use std::os::fd::{AsFd, OwnedFd};
 
@@ -11,7 +14,7 @@ use nucleus_projects_interface::{
     CHUNK_BYTES, Chunk, Entry, Kind, Listing, MAX_FILE_BYTES, PAGE_ENTRIES, segments,
 };
 use nucleus_protocol::{Error, ErrorCode};
-use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags, Statx, StatxFlags};
 
 use crate::home::{Home, errno, fresh_name, open_beneath, open_dir};
 
@@ -67,6 +70,44 @@ fn kind(mode: u32) -> Kind {
         FileType::Symlink => Kind::Link,
         _ => Kind::Other,
     }
+}
+
+fn created(stat: &Statx) -> Option<u64> {
+    if stat.stx_mask & StatxFlags::BTIME.bits() == 0 {
+        return None;
+    }
+    let seconds = u64::try_from(stat.stx_btime.tv_sec).ok()?;
+    seconds.checked_mul(1000)?.checked_add(u64::from(stat.stx_btime.tv_nsec) / 1_000_000)
+}
+
+/// All displayed fields come from one observation of the name. In particular,
+/// never add a second pathname lookup's birth time to an earlier stat: another
+/// process may have replaced the name with a different inode between them.
+fn entry(dir: impl AsFd, name: &std::ffi::CStr, shown: String) -> Result<Entry, rustix::io::Errno> {
+    let required = StatxFlags::TYPE | StatxFlags::SIZE | StatxFlags::MTIME;
+    if let Ok(stat) =
+        rustix::fs::statx(&dir, name, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::BASIC_STATS | StatxFlags::BTIME)
+        && stat.stx_mask & required.bits() == required.bits()
+    {
+        let seconds = u64::try_from(stat.stx_mtime.tv_sec).unwrap_or(0);
+        return Ok(Entry {
+            name: shown,
+            kind: kind(u32::from(stat.stx_mode)),
+            size: stat.stx_size,
+            modified: seconds
+                .saturating_mul(1000)
+                .saturating_add(u64::from(stat.stx_mtime.tv_nsec) / 1_000_000),
+            created: created(&stat),
+        });
+    }
+    let stat = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    Ok(Entry {
+        name: shown,
+        kind: kind(stat.st_mode),
+        size: u64::try_from(stat.st_size).unwrap_or(0),
+        modified: millis(&stat),
+        created: None,
+    })
 }
 
 /// Where an entry stands in listing order: directories first, then by name
@@ -144,15 +185,10 @@ pub fn list(dir: impl AsFd, path: &str, after: Option<&str>) -> Result<Listing, 
     let mut entries = Vec::with_capacity(places.len());
     for place in places {
         let Ok(name) = std::ffi::CString::new(place.name) else { continue };
-        let Ok(stat) = rustix::fs::statat(&opened, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) else {
+        let Ok(entry) = entry(&opened, name.as_c_str(), place.shown) else {
             continue; // removed since it was listed
         };
-        entries.push(Entry {
-            name: place.shown,
-            kind: kind(stat.st_mode),
-            size: u64::try_from(stat.st_size).unwrap_or(0),
-            modified: millis(&stat),
-        });
+        entries.push(entry);
     }
     Ok(Listing { entries, next })
 }
@@ -259,5 +295,29 @@ pub fn clear_staging(home: &Home) {
                 _ => dir.remove_file(&name),
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn creation_time_requires_the_birth_time_mask_and_a_representable_timestamp() {
+        let file = tempfile::tempfile().unwrap();
+        let mut stat = rustix::fs::statx(&file, "", AtFlags::EMPTY_PATH, StatxFlags::BASIC_STATS).unwrap();
+        stat.stx_btime.tv_sec = 123;
+        stat.stx_btime.tv_nsec = 456_000_000;
+        stat.stx_mask |= StatxFlags::BTIME.bits();
+        assert_eq!(created(&stat), Some(123_456));
+        stat.stx_mask &= !StatxFlags::BTIME.bits();
+        assert_eq!(created(&stat), None, "unreported birth time is not replaced by mtime or ctime");
+        stat.stx_mask |= StatxFlags::BTIME.bits();
+        stat.stx_btime.tv_sec = -1;
+        assert_eq!(created(&stat), None, "pre-epoch time is not clamped to a fictitious creation time");
+        stat.stx_btime.tv_sec = i64::MAX;
+        assert_eq!(created(&stat), None, "a time outside the wire's millisecond range is unavailable");
     }
 }

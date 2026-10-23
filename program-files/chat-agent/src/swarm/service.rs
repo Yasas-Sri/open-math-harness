@@ -3,9 +3,12 @@
 //! swarm's board, decides registrations with the duplicate check, takes
 //! findings and members' reports, starts and stops the members, writes each
 //! swarm's progress to a records file of its own, wakes the session whose
-//! agent started a swarm with each member's report and when the swarm runs
-//! out unsolved or a restart interrupted it, and appends an `ultramath_ended`
-//! reference to the session's conversation when a swarm ends.
+//! agent started a swarm with each member's report, when the swarm ends on its
+//! own and when a restart interrupted it, and appends an `ultramath_ended`
+//! reference to the session's conversation when a swarm ends. A session may run
+//! several swarms. Their model calls queue for the slots of the VM's model
+//! adapter, but nothing bounds the number of swarms, their member processes
+//! or their memory, by the owner's decision.
 //!
 //! It never waits for a session's agent, and nothing it does waits for one
 //! swarm on behalf of another: one thread serves every call as it arrives,
@@ -33,10 +36,11 @@
 //! markers and `<state>/records/<project>/`.
 //!
 //! Swarms live in this process. A marker of each running one is kept in the
-//! state directory only so that, after a restart of the VM's Nucleus, the
-//! next service records it `interrupted` and wakes its session: nothing
-//! resumes a swarm, and its members died with the process that started
-//! them.
+//! state directory so that, after a restart of the VM's Nucleus, the next
+//! service records it `interrupted` and wakes its session: its members died
+//! with the process that started them. The session's agent may then resume
+//! it (`resume`, [`resume`]): the service rebuilds it from its records and
+//! starts each member that was working again on its transcript.
 //!
 //! **Privileges.** The service holds `spawn_as` and the chat program, to
 //! start members; `fs` and `shell` on every project, `model complete` and
@@ -75,6 +79,7 @@ use super::board::Board;
 use super::members;
 
 mod claims;
+mod resume;
 mod start;
 mod verdicts;
 
@@ -126,13 +131,11 @@ pub struct Options {
     /// their project when this is given and the service
     /// holds `kernel spawn_as`.
     pub projects: Option<String>,
-    /// Swarms running in the VM at once.
-    pub max_swarms: usize,
 }
 
 impl Options {
     /// Parses `--state <dir> --member-executable <path> --model <id>...
-    /// [--member-arg <arg>]... [--projects <dir>] [--max-swarms <n>]`.
+    /// [--member-arg <arg>]... [--projects <dir>]`.
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut options = Self {
             state: PathBuf::new(),
@@ -140,7 +143,6 @@ impl Options {
             member_args: Vec::new(),
             models: Vec::new(),
             projects: None,
-            max_swarms: 2,
         };
         let mut args = args.into_iter();
         while let Some(flag) = args.next() {
@@ -156,13 +158,6 @@ impl Options {
                     options.models.push(value);
                 }
                 "--projects" => options.projects = Some(value),
-                "--max-swarms" => {
-                    options.max_swarms = value
-                        .parse()
-                        .ok()
-                        .filter(|n| (1..=8).contains(n))
-                        .ok_or("--max-swarms must be between 1 and 8")?;
-                }
                 _ => return Err(format!("unknown option {flag}")),
             }
         }
@@ -305,6 +300,8 @@ struct Swarm {
     budget: u64,
     reserved: u64,
     checks: u64,
+    /// Model calls it made before it was interrupted and resumed.
+    carried: u64,
     deadline: Instant,
     deadline_at_ms: u64,
     phase: Phase,
@@ -353,7 +350,7 @@ impl Swarm {
 
     /// The model calls the swarm has made: its members' runs and its checks.
     fn calls(&self) -> u64 {
-        self.members.iter().map(|m| m.spent + m.calls).sum::<u64>() + self.checks
+        self.carried + self.members.iter().map(|m| m.spent + m.calls).sum::<u64>() + self.checks
     }
 
     fn minutes_left(&self) -> u64 {
@@ -495,6 +492,7 @@ impl Service {
             (2, wire::ACTION_RECORDS) => self.records(&segments[0], &segments[1], &d.payload),
             (2, wire::ACTION_VERDICT) => self.verdict(kernel, &segments[0], &segments[1], &d.payload)?,
             (2, wire::ACTION_STOP) => self.stop(kernel, &segments[0], &segments[1], &d.payload)?,
+            (2, wire::ACTION_RESUME) => self.resume(kernel, &segments[0], &segments[1], &d.payload)?,
             (4, _) if MEMBER_ACTIONS.contains(&action) => match self.member_call(kernel, d)? {
                 Some(outcome) => outcome,
                 // A registration waits for its duplicate check, a report for
@@ -743,17 +741,21 @@ impl Service {
     }
 }
 
-/// Where a swarm's records are: beneath its session, so an agent reaches its
-/// own session's swarms only.
+/// Where a session's swarms' records are: beneath the session, so an agent
+/// reaches its own session's swarms only.
+fn records_dir(state: &Path, project: &str, session: &str) -> PathBuf {
+    state.join("records").join(project).join(session)
+}
+
+/// Where a swarm's records are, in its session's [`records_dir`].
 fn records_path(state: &Path, project: &str, session: &str, swarm: &str) -> PathBuf {
-    state.join("records").join(project).join(session).join(format!("{swarm}.jsonl"))
+    records_dir(state, project, session).join(format!("{swarm}.jsonl"))
 }
 
 /// The session's newest swarm that has records: ids grow with their start
 /// time, so the longest and then greatest.
 fn latest_recorded(state: &Path, project: &str, session: &str) -> Option<String> {
-    let directory = records_path(state, project, session, "x");
-    std::fs::read_dir(directory.parent()?)
+    std::fs::read_dir(records_dir(state, project, session))
         .ok()?
         .flatten()
         .filter_map(|entry| entry.file_name().to_str()?.strip_suffix(".jsonl").map(str::to_owned))
@@ -785,6 +787,51 @@ fn next_seq_of(path: &Path) -> u64 {
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok()?["seq"].as_u64())
         .max()
         .map_or(0, |seq| seq + 1)
+}
+
+/// Every record of the file at `path` that reads as one, in order, with the
+/// time it was written (`at_ms`).
+fn read_swarm_records(path: &Path) -> std::io::Result<Vec<(u64, SwarmRecord)>> {
+    let file = std::fs::File::open(path)?;
+    let mut records = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        records.extend(parse_record(&line?));
+    }
+    Ok(records)
+}
+
+/// The last line of the records file at `path`, read from its end, as a
+/// record: `None` when the file is empty or that line is not one.
+fn last_record(path: &Path) -> std::io::Result<Option<SwarmRecord>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut tail: u64 = 4096;
+    loop {
+        let from = size.saturating_sub(tail);
+        file.seek(SeekFrom::Start(from))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines = text.trim_end().rsplit('\n');
+        let last = lines.next().unwrap_or_default();
+        // The line is whole when the line before it was read too, or the file's start.
+        if from == 0 || lines.next().is_some() {
+            return Ok(parse_record(last).map(|(_, record)| record));
+        }
+        tail = tail.saturating_mul(4);
+    }
+}
+
+/// A line of a records file as its record, with its `at_ms`.
+fn parse_record(line: &str) -> Option<(u64, SwarmRecord)> {
+    let mut value = serde_json::from_str::<Value>(line).ok()?;
+    let at = value["at_ms"].as_u64().unwrap_or(0);
+    if let Some(fields) = value.as_object_mut() {
+        fields.remove("seq");
+        fields.remove("at_ms");
+    }
+    serde_json::from_value::<SwarmRecord>(value).ok().map(|record| (at, record))
 }
 
 /// One page of the records file at `path`: from `after`, at most `limit`
@@ -846,11 +893,12 @@ fn mark_interrupted(kernel: &mut Kernel, authority: &Authority, options: &Option
             && let Ok(resource) = ResourcePath::new([project.as_str(), session.as_str()])
         {
             let file = records_path(&options.state, &project, &session, &swarm);
+            let calls = read_swarm_records(&file).map_or(0, |records| resume::calls_made(&records));
             let ended = SwarmRecord::Ended {
                 swarm: swarm.clone(),
                 outcome: Outcome::Interrupted,
-                note: "the VM's Open Math OS runtime restarted; nothing resumes a swarm".into(),
-                calls: 0,
+                note: "the VM's Open Math OS runtime restarted; the session's agent may resume it".into(),
+                calls,
                 reserved_calls: 0,
                 checks: 0,
             };
@@ -872,8 +920,10 @@ fn mark_interrupted(kernel: &mut Kernel, authority: &Authority, options: &Option
                 Err(e) => return Err(e.to_string()),
             }
             let text = format!(
-                "Swarm {swarm} was interrupted: the VM's Open Math OS runtime restarted, and nothing resumes a swarm. Its \
-                 records: ultramath_records with swarm {swarm}. Tell the person what they show."
+                "Swarm {swarm} was interrupted: the VM's Open Math OS runtime restarted and its members stopped. \
+                 ultramath_resume with swarm {swarm} continues it where it stopped (its board, the reports waiting \
+                 for your verdict, and each member's work), and ultramath_records with swarm {swarm} shows what it \
+                 did. Tell the person, and resume it if they want it to go on."
             );
             let request = conversation::RemindRequest { after_ms: 0, text };
             let woken = kernel.call(
@@ -953,7 +1003,7 @@ mod tests {
         let base =
             ["--state", "/state", "--member-executable", "/programs/nucleus-chat-agent", "--model", "a/b"];
         let parsed = parse(&base).unwrap();
-        assert_eq!((parsed.models.as_slice(), parsed.max_swarms), (&["a/b".to_owned()][..], 2));
+        assert_eq!(parsed.models.as_slice(), &["a/b".to_owned()][..]);
         assert!(
             parse(&[&base[..], &["--member-arg", "--personality", "--member-arg", "none"]].concat()).is_ok()
         );
@@ -962,7 +1012,7 @@ mod tests {
             // A swarm's effort is its start's.
             &["--member-arg", "--reasoning-effort", "--member-arg", "low"],
             &["--model", "a/b"],
-            &["--max-swarms", "0"],
+            &["--max-swarms", "2"],
             &["--unknown", "x"],
         ] {
             assert!(parse(&[&base[..], bad].concat()).is_err(), "{bad:?}");

@@ -447,13 +447,19 @@ pub enum Kind {
 }
 
 /// One directory entry. `size` is the entry's own (a link's, not its
-/// target's); `modified` is in milliseconds since the Unix epoch.
+/// target's); timestamps are in milliseconds since the Unix epoch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub name: String,
     pub kind: Kind,
     pub size: u64,
     pub modified: u64,
+    /// The current VM inode's birth time, absent when the host or filesystem
+    /// cannot report it. Atomic replacement (including editor saves) may
+    /// change it; it is not the original local file's creation time. Neither
+    /// modification nor inode-change time substitutes for a missing value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
 }
 
 /// One page of a directory, at most [`PAGE_ENTRIES`]: directories first,
@@ -713,6 +719,31 @@ pub fn host_interface(endpoint: EndpointName) -> Result<InterfaceDecl, Error> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn directory_entry_creation_time_is_optional_on_the_wire() {
+        use nucleus_protocol::Payload;
+
+        // Existing runtimes send no created field; existing consumers ignore
+        // the optional field sent by a newer host.
+        #[derive(Serialize, Deserialize)]
+        struct PreviousEntry {
+            name: String,
+            kind: Kind,
+            size: u64,
+            modified: u64,
+        }
+        let previous =
+            PreviousEntry { name: "proof.lean".into(), kind: Kind::File, size: 12, modified: 1234 };
+        let old_payload = Payload::encode(&previous).unwrap();
+        let mut entry: Entry = old_payload.decode().unwrap();
+        assert_eq!(entry.created, None);
+        assert_eq!(Payload::encode(&entry).unwrap(), old_payload, "a missing value stays absent");
+        entry.created = Some(1000);
+        let payload = Payload::encode(&entry).unwrap();
+        assert_eq!(payload.decode::<Entry>().unwrap(), entry);
+        assert_eq!(payload.decode::<PreviousEntry>().unwrap().modified, previous.modified);
+    }
 
     /// A dir id and its resources name the same directory every way; nothing
     /// outside the grammar parses, so no id names a path that leaves the

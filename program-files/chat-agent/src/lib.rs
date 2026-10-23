@@ -48,7 +48,7 @@
 //! handle, where a composition sets one, counts its `start`s and `complete`s;
 //! pulls are not charged against it. A session's agent has none.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use nucleus_approvals_interface as approvals;
 mod attachments;
@@ -215,7 +215,11 @@ pub struct Options {
     /// is this transcript plus one more message.
     pub transcript: Option<Vec<String>>,
     /// Start from a transcript written earlier, then take the task as the next
-    /// message: how a swarm member goes on after the judge's answer.
+    /// message: how a swarm member goes on after the judge's answer, or when a
+    /// restart interrupted its swarm and the swarm is resumed. A call the
+    /// transcript leaves without a result gets one saying it did not return,
+    /// and a long one is bounded as a session's history is
+    /// (`restore::transcript`).
     pub resume: Option<Vec<String>>,
     /// One-shot mode: answer this and exit, instead of waiting for messages.
     ///
@@ -681,9 +685,9 @@ struct Agent<'a> {
     plugins: plugins::Plugins,
     /// What a swarm member's own loop knows of its claim.
     swarm_member: Option<swarm::member::Member>,
-    /// Who has written in the session, its earlier agents' turns included
+    /// Who has written and their last selected mode, earlier agents' turns included
     /// (`reminders::queued_prompt`).
-    authors: BTreeSet<Option<String>>,
+    authors: BTreeMap<Option<String>, model::ReasoningMode>,
 }
 
 /// A model outcome and the provisional display records it may replace.
@@ -1777,13 +1781,20 @@ const TOOL_DEADLINE_MARGIN_MS: u64 = 30_000;
 /// The deadline for a tool call: a tool that takes `timeout_ms` (the shell)
 /// gets that plus a margin; `github_fetch`, `github_push` and
 /// `github_fetch_pull_request` get 20 minutes, `github_pull_request` and
-/// `github_issue` two; anything else gets the kernel's default. A swarm member's registration
-/// waits for the swarm's duplicate checks, one at a time, so it gets longer.
+/// `github_issue` and PR label writes two; anything else gets the kernel's default.
+/// A swarm member's registration waits for the swarm's duplicate checks, one at a time,
+/// so it gets longer.
 fn tool_deadline_ms(name: &str, payload: &Value) -> Option<u64> {
     if matches!(name, "github_fetch" | "github_push" | "github_fetch_pull_request") {
         return Some(1_200_000);
     }
-    if matches!(name, "github_pull_request" | "github_issue") {
+    if matches!(
+        name,
+        "github_pull_request"
+            | "github_issue"
+            | "github_add_pull_request_labels"
+            | "github_remove_pull_request_label"
+    ) {
         return Some(120_000);
     }
     swarm::member::deadline_ms(name).or_else(|| {
@@ -1930,33 +1941,46 @@ pub fn run(options: &Options) -> Result<(), String> {
     let mut history = images::History::default();
     // Whether this agent's model takes images (`--image-model`).
     let image_input = options.image_models.contains(&options.model);
+    let mut restored = restore::Restored::default();
     if let Some(path) = &options.resume {
         let path = ResourcePath::new(path.iter().cloned()).map_err(|e| e.to_string())?;
         let handle = kernel
             .find_handle_for("fs", "read", &path)
             .ok_or("--resume needs an `fs` capability for `read`")?;
-        let reply = kernel.call(handle, "read", &path, &json!({}), None).map_err(|e| e.to_string())?;
-        let content = reply
-            .and_then(|p| p.decode::<Value>())
-            .map_err(|e| format!("the transcript could not be read: {e}"))?;
-        let text = content.get("content").and_then(Value::as_str).unwrap_or_default();
+        // A page at a time: one read returns at most the `fs` service's limit,
+        // ending before a character it would cut, so the next starts where it ended.
+        let mut text = String::new();
+        loop {
+            let page = json!({"offset": text.len()});
+            let reply = kernel.call(handle, "read", &path, &page, None).map_err(|e| e.to_string())?;
+            let page = reply
+                .and_then(|p| p.decode::<Value>())
+                .map_err(|e| format!("the transcript could not be read: {e}"))?;
+            let content = page.get("content").and_then(Value::as_str).unwrap_or_default();
+            text.push_str(content);
+            if content.is_empty() || page.get("eof").and_then(Value::as_bool) != Some(false) {
+                break;
+            }
+        }
+        let mut lines = Vec::new();
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             match images::parse_line(line) {
-                Ok((message, images)) => history.restore(message, images),
+                Ok(read) => lines.push(read),
                 // A damaged line is reported and skipped: a continuation from
                 // most of a transcript is worth more than a refusal to start,
                 // and the gap must not be silent.
                 Err(e) => eprintln!("nucleus-chat-agent: a transcript line was unreadable: {e}"),
             }
         }
-        // The images that fit are read again, and shown only if unchanged.
-        history.settle(|source| images::reload(workdir.as_ref(), source));
+        // An agent stopped while a call ran left the call without a result:
+        // it gets one saying so, and a long transcript is bounded as a
+        // session's log is (module `restore`).
+        restored = restore::transcript(lines, options.compact_at_tokens, image_input);
     }
     // An agent that waits for messages continues its session's conversation,
     // whatever ended the agent before it: what that agent's model saw,
     // rebuilt from the session's log, which it may read and no other
     // (module `restore`). Without that it does not start.
-    let mut restored = restore::Restored::default();
     if options.task.is_none() {
         let reader = kernel
             .find_handle_for(conversation::ENDPOINT, conversation::ACTION_HISTORY, &session)
@@ -1964,14 +1988,18 @@ pub fn run(options: &Options) -> Result<(), String> {
             "started without a `conversation` capability for `history` on its session, which it continues",
         )?;
         restored = restore::read(&mut kernel, reader, &session, options.compact_at_tokens, image_input)?;
-        let mut images = std::mem::take(&mut restored.images).into_iter().peekable();
-        for (index, message) in std::mem::take(&mut restored.messages).into_iter().enumerate() {
-            let held = images.next_if(|(at, _)| *at == index).map(|(_, held)| held).unwrap_or_default();
-            history.restore(message, held);
-        }
-        // The images messages carry are shown again as far as they fit.
-        history.settle(|_| Err("it was not read".to_owned()));
     }
+    let mut images = std::mem::take(&mut restored.images).into_iter().peekable();
+    for (index, message) in std::mem::take(&mut restored.messages).into_iter().enumerate() {
+        let held = images.next_if(|(at, _)| *at == index).map(|(_, held)| held).unwrap_or_default();
+        history.restore(message, held);
+    }
+    // The images messages carry are shown again as far as they fit: a
+    // transcript's are read again, and shown only if unchanged.
+    let reload = options.resume.is_some();
+    history.settle(|source| {
+        if reload { images::reload(workdir.as_ref(), source) } else { Err("it was not read".to_owned()) }
+    });
     let mut agent = Agent {
         transcript,
         plugins: plugins::Plugins::default(),
@@ -2076,7 +2104,12 @@ mod tests {
         );
         assert_eq!(tool_deadline_ms("shell_exec", &json!({"command": "ls"})), None);
         assert_eq!(tool_deadline_ms("github_fetch_pull_request", &json!({"reference":7})), Some(1_200_000));
-        for name in ["github_pull_request", "github_issue"] {
+        for name in [
+            "github_pull_request",
+            "github_issue",
+            "github_add_pull_request_labels",
+            "github_remove_pull_request_label",
+        ] {
             assert_eq!(tool_deadline_ms(name, &json!({"reference":7})), Some(120_000));
         }
     }

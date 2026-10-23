@@ -351,7 +351,9 @@ pub const ACTION_POST: &str = "post";
 /// message and opens no turn, and the window shows the finished board there,
 /// read from the swarm service's own records. In the VM only the swarm
 /// service holds it, not delegable, and calls it when a swarm ends, also for
-/// one a restart interrupted; a failed call is logged and not retried.
+/// one a restart interrupted; a failed call is logged and not retried. A swarm
+/// that was interrupted and then resumed has more than one, and its last marks
+/// where it ended: the window shows the board there.
 pub const ACTION_ULTRAMATH_ENDED: &str = "ultramath_ended";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

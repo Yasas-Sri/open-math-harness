@@ -300,6 +300,8 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Max,
+    /// Above `max`, where the provider offers it.
+    Xhigh,
 }
 
 impl ReasoningEffort {
@@ -311,6 +313,7 @@ impl ReasoningEffort {
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
             "max" => Some(Self::Max),
+            "xhigh" => Some(Self::Xhigh),
             _ => None,
         }
     }
@@ -323,6 +326,7 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Max => "max",
+            Self::Xhigh => "xhigh",
         }
     }
 }
@@ -342,6 +346,7 @@ pub enum EffortSetting {
     Medium,
     High,
     Max,
+    Xhigh,
 }
 
 /// The session harness strategy, independent of provider reasoning effort.
@@ -356,8 +361,8 @@ pub enum ReasoningMode {
 
 impl EffortSetting {
     /// Every setting.
-    pub const ALL: [Self; 7] =
-        [Self::Default, Self::On, Self::Off, Self::Low, Self::Medium, Self::High, Self::Max];
+    pub const ALL: [Self; 8] =
+        [Self::Default, Self::On, Self::Off, Self::Low, Self::Medium, Self::High, Self::Max, Self::Xhigh];
 
     /// The setting whose requests carry `effort`: `default` for none.
     #[must_use]
@@ -376,6 +381,7 @@ impl EffortSetting {
             Self::Medium => Some(ReasoningEffort::Medium),
             Self::High => Some(ReasoningEffort::High),
             Self::Max => Some(ReasoningEffort::Max),
+            Self::Xhigh => Some(ReasoningEffort::Xhigh),
         }
     }
 }
@@ -721,7 +727,7 @@ mod tests {
     fn an_effort_setting_carries_only_its_requested_control() {
         assert_eq!(
             serde_json::to_value(EffortSetting::ALL).ok(),
-            Some(json!(["default", "on", "off", "low", "medium", "high", "max"]))
+            Some(json!(["default", "on", "off", "low", "medium", "high", "max", "xhigh"]))
         );
         for setting in EffortSetting::ALL {
             let name = serde_json::to_value(setting).ok();

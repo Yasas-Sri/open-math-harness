@@ -161,8 +161,9 @@ fn check_swarm_service(config: &LauncherConfig) {
     let options = nucleus_chat_agent::swarm::service::Options::parse(args[1..].iter().cloned()).unwrap();
     assert!(!options.models.is_empty(), "the platform's swarm_models");
     assert!(
-        grant_lines(entry(config, "parent"))
-            .contains(r#"swarm ["records", "start", "status", "stop", "verdict"] [] delegable=true"#)
+        grant_lines(entry(config, "parent")).contains(
+            r#"swarm ["records", "resume", "start", "status", "stop", "verdict"] [] delegable=true"#
+        )
     );
     assert_eq!(values_of(&program(config, "parent").args, "--session-scope"), ["swarm", "jobs"]);
 }
@@ -374,7 +375,13 @@ fn the_vm_composition_caps_the_desktop_at_the_ui_services_grants() {
         ])
     );
     assert_eq!(holders(&config, "github", "fetch"), ["parent"]);
-    for action in ["pull_request", "issue", "fetch_pull_request"] {
+    for action in [
+        "pull_request",
+        "issue",
+        "fetch_pull_request",
+        "add_pull_request_labels",
+        "remove_pull_request_label",
+    ] {
         assert_eq!(holders(&config, "github", action), ["parent"]);
     }
     // The link broker also serves `platform_request`, which only chat sessions hold.
@@ -1219,6 +1226,7 @@ fn the_vm_swarm_service_starts_members_whose_calls_are_held_to_their_own_slot() 
     for (handle, action, resource) in [
         (slots, "verdict", &["default", "s1"][..]),
         (slots, "stop", &["default", "s1"]),
+        (slots, "resume", &["default", "s1"]),
         (slots, "start", &["default", "s1"]),
         (slots, "status", &["default", "s1"]),
         (slots, "register", &["default", "s1", "sabc", "m1"]),

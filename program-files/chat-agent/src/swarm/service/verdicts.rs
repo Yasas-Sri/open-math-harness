@@ -1,6 +1,8 @@
-//! The session agent's calls: the swarm's status and records, the verdict on
-//! a submission (an accept stops the others, a rejection continues the
-//! member once), stopping a swarm; and how a swarm ends.
+//! The session agent's calls: a swarm's status and records, the verdict on a
+//! submission (an accept stops its member, and with `finish` every other one; a
+//! rejection continues the member once), stopping a swarm; and how a swarm ends.
+//! A call names one of the session's swarms, or takes its only running one
+//! ([`Service::session_swarm`]).
 //!
 //! A verdict is the session agent's model judgement: a persuasive wrong
 //! solution can be accepted by an agent that did not check it.
@@ -14,8 +16,8 @@ use nucleus_swarm_interface::{
 use serde_json::{Value, json};
 
 use super::{
-    Call, Kernel, Phase, Service, Swarm, WAKE_DEADLINE_MS, invalid, latest_recorded, read_records,
-    records_path,
+    Call, Kernel, Phase, Service, Swarm, WAKE_DEADLINE_MS, invalid, last_record, latest_recorded,
+    read_records, records_path,
 };
 use crate::swarm::board::{Judged, preview};
 use crate::swarm::members;
@@ -84,6 +86,21 @@ impl Service {
         if matches!(swarm.phase, Phase::Ended(_)) {
             return Ok(());
         }
+        // A swarm with an accepted submission is solved, however it ended.
+        let accepted = swarm.board.accepted();
+        let (outcome, note) = match outcome {
+            Outcome::Exhausted | Outcome::Deadline | Outcome::Stopped if accepted > 0 => {
+                let how = match outcome {
+                    Outcome::Exhausted => "every member ended",
+                    Outcome::Deadline => "its time ran out",
+                    _ => "it was stopped",
+                };
+                let said = if note.is_empty() { String::new() } else { format!(": {note}") };
+                (Outcome::Solved, preview(&format!("{accepted} accepted; {how}{said}"), 900))
+            }
+            _ => (outcome, note.to_owned()),
+        };
+        let note = note.as_str();
         swarm.phase = Phase::Ended(outcome);
         let waiting: Vec<DispatchId> = swarm
             .queue
@@ -121,11 +138,19 @@ impl Service {
                 "nucleus-swarm: completion of {swarm_id} could not be added to the conversation: {e}"
             ),
         }
-        if wake && outcome != Outcome::Solved {
-            let text = format!(
-                "Swarm {swarm_id} ended without an accepted solution ({outcome_name}). Read the board with \
-                 ultramath_status and its records with ultramath_records, and tell the person what they show."
-            );
+        if wake {
+            let text = if outcome == Outcome::Solved {
+                format!(
+                    "Swarm {swarm_id} ended solved ({note}). Read its accepted solutions with ultramath_status \
+                     and ultramath_records (swarm {swarm_id}), and tell the person."
+                )
+            } else {
+                format!(
+                    "Swarm {swarm_id} ended without an accepted solution ({outcome_name}). Read the board with \
+                     ultramath_status and its records with ultramath_records (swarm {swarm_id}), and tell the \
+                     person what they show."
+                )
+            };
             if let Err(e) = self.wake(kernel, &session, text, Call::Wake(swarm_id.to_owned()))? {
                 eprintln!("nucleus-swarm: the session of swarm {swarm_id} could not be woken: {e}");
             }
@@ -133,12 +158,68 @@ impl Service {
         Ok(())
     }
 
-    pub(super) fn session_swarm(&mut self, project: &str, session: &str) -> Result<&mut Swarm, Error> {
-        let id = self
-            .latest
-            .get(&(project.to_owned(), session.to_owned()))
-            .ok_or_else(|| invalid("this session has started no swarm"))?;
-        self.swarms.get_mut(id).ok_or_else(|| invalid("this session's swarm is gone"))
+    /// The ids of the session's running swarms, oldest first.
+    pub(super) fn session_running(&self, project: &str, session: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .swarms
+            .values()
+            .filter(|s| s.project == project && s.session == session && s.running())
+            .map(|s| s.id.clone())
+            .collect();
+        // Ids grow with their start time.
+        ids.sort_by_key(|id| (id.len(), id.clone()));
+        ids
+    }
+
+    /// The session's swarm a call of its agent is about: the one it names, or
+    /// with none its only running one. With several running, `newest` takes
+    /// the newest (`status`); otherwise the call is refused, naming them. With
+    /// none running, the session's latest, from its records after a restart.
+    /// A swarm this service does not hold is refused, saying from its records
+    /// whether a restart interrupted it (`resume` continues it) or it ended.
+    pub(super) fn session_swarm(
+        &mut self,
+        project: &str,
+        session: &str,
+        wanted: Option<&str>,
+        newest: bool,
+    ) -> Result<&mut Swarm, Error> {
+        let id = match wanted {
+            Some(id) => id.to_owned(),
+            None => {
+                let running = self.session_running(project, session);
+                match running.as_slice() {
+                    [] => self
+                        .latest
+                        .get(&(project.to_owned(), session.to_owned()))
+                        .cloned()
+                        .or_else(|| latest_recorded(&self.options.state, project, session))
+                        .ok_or_else(|| invalid("this session has started no swarm"))?,
+                    [only] => only.clone(),
+                    [.., last] if newest => last.clone(),
+                    several => {
+                        return Err(invalid(format!(
+                            "this session runs {} swarms ({}): name one with swarm",
+                            several.len(),
+                            several.join(", ")
+                        )));
+                    }
+                }
+            }
+        };
+        if !self.swarms.get(&id).is_some_and(|s| s.project == project && s.session == session) {
+            // Its last record says which: nothing follows an interruption until a resume.
+            let path = records_path(&self.options.state, project, session, &id);
+            return Err(invalid(match last_record(&path) {
+                Err(_) => format!("this session has no swarm {id}"),
+                Ok(Some(SwarmRecord::Ended { outcome: Outcome::Interrupted, .. })) => format!(
+                    "swarm {id} was interrupted by a restart of the VM's runtime: ultramath_resume with swarm \
+                     {id} continues it, and ultramath_records with swarm {id} shows what it did"
+                ),
+                Ok(_) => format!("swarm {id} has ended: ultramath_records with swarm {id} shows what it did"),
+            }));
+        }
+        self.swarms.get_mut(&id).ok_or_else(|| invalid("this session's swarm is gone"))
     }
 
     pub(super) fn status(
@@ -148,7 +229,9 @@ impl Service {
         payload: &Payload,
     ) -> Result<Payload, Error> {
         let request = payload.decode::<StatusRequest>()?;
-        let swarm = self.session_swarm(project, session)?;
+        request.validate()?;
+        let running = self.session_running(project, session);
+        let swarm = self.session_swarm(project, session, request.swarm.as_deref(), true)?;
         if let Some(direction) = request.direction {
             let page = swarm.board.page(&direction)?;
             let waiting = swarm.board.pending().find(|s| s.direction == direction).cloned();
@@ -177,6 +260,8 @@ impl Service {
             "waiting_for_verdict": swarm.board.pending_previews(),
             "board": swarm.board.overview(),
             "records": {"written": swarm.next_seq, "unwritten": swarm.unwritten},
+            "accepted": swarm.board.accepted(),
+            "running": running,
         });
         Payload::encode(&status)
     }
@@ -212,7 +297,7 @@ impl Service {
             Ok(request) => request,
             Err(e) => return Ok(Err(e)),
         };
-        let swarm = match self.session_swarm(project, session) {
+        let swarm = match self.session_swarm(project, session, Some(&request.swarm), false) {
             Ok(swarm) if swarm.running() => swarm,
             Ok(swarm) => return Ok(Err(invalid(format!("swarm {} has ended", swarm.id)))),
             Err(e) => return Ok(Err(e)),
@@ -223,7 +308,7 @@ impl Service {
         };
         let swarm_id = swarm.id.clone();
         let direction = match &judged {
-            Judged::Solved { direction } | Judged::Retry { direction } | Judged::Dead { direction } => {
+            Judged::Accepted { direction } | Judged::Retry { direction } | Judged::Dead { direction } => {
                 direction.clone()
             }
         };
@@ -238,27 +323,56 @@ impl Service {
             },
         );
         let member = request.member.clone();
+        // Whether the verdict accepted without finishing the swarm.
+        let mut accepted_only = false;
         let outcome = match judged {
-            Judged::Solved { direction } => {
+            Judged::Accepted { direction } => {
                 self.direction_changed(&swarm_id, &direction);
+                // Its member's run ended with its submission: it stops there.
                 if let Some(swarm) = self.swarms.get_mut(&swarm_id)
                     && let Some(m) = swarm.members.iter_mut().find(|m| m.name == member)
                 {
-                    m.state = MemberState::Ended;
+                    m.state = MemberState::Stopped;
+                    if let Some(process) = m.process.take() {
+                        let _ = kernel.kill(process)?;
+                    }
                 }
-                let stopped = self.stop_members(kernel, &swarm_id, "the swarm is solved")?;
-                self.finish(
-                    kernel,
+                self.record(
                     &swarm_id,
-                    Outcome::Solved,
-                    &format!("{member} solved it under {direction}"),
-                    false,
-                )?;
-                format!(
-                    "Accepted. {} other members were stopped ({}). The swarm is solved: tell the person.",
-                    stopped.len(),
-                    stopped.join(", ")
-                )
+                    SwarmRecord::Member {
+                        swarm: swarm_id.clone(),
+                        member: member.clone(),
+                        state: MemberState::Stopped,
+                        note: "its solution was accepted".into(),
+                        process: None,
+                    },
+                );
+                let accepted = self.swarms.get(&swarm_id).map_or(0, |s| s.board.accepted());
+                if request.finish {
+                    let stopped = self.stop_members(kernel, &swarm_id, "a verdict finished the swarm")?;
+                    if let Some(swarm) = self.swarms.get_mut(&swarm_id) {
+                        swarm.board.drop_pending();
+                    }
+                    self.finish(
+                        kernel,
+                        &swarm_id,
+                        Outcome::Solved,
+                        &format!("{accepted} accepted; finished with {member}'s under {direction}"),
+                        false,
+                    )?;
+                    format!(
+                        "Accepted, and the swarm is finished: {} other members were stopped ({}). It has \
+                         {accepted} accepted solutions.",
+                        stopped.len(),
+                        stopped.join(", ")
+                    )
+                } else {
+                    accepted_only = true;
+                    format!(
+                        "Accepted: {member}'s solution under {direction} is the swarm's accepted solution number \
+                         {accepted}, and {member} stops."
+                    )
+                }
             }
             Judged::Retry { direction } => {
                 let task = self.swarms.get(&swarm_id).map(|s| {
@@ -287,14 +401,37 @@ impl Service {
             }
         };
         self.settle(kernel, &swarm_id, false)?;
-        let running = self.swarms.get(&swarm_id).is_some_and(Swarm::running);
-        let outcome = if running {
-            outcome
-        } else {
-            let state = self.swarms.get(&swarm_id).map(Swarm::state_name).unwrap_or_default();
-            format!("{outcome} The swarm has ended ({state}): tell the person what its board shows.")
+        // The reply says the swarm's state once, as the verdict and the
+        // settling left it: an accept that left nothing running ended it.
+        let (running, state) = match self.swarms.get(&swarm_id) {
+            Some(swarm) if swarm.running() => {
+                let members = swarm.members.iter().filter(|m| m.state == MemberState::Running).count();
+                let waiting = swarm.board.pending().count();
+                let goes_on = accepted_only.then(|| match swarm.phase {
+                    Phase::Closing => {
+                        format!("Its time is over: {waiting} reports still wait for your verdict.")
+                    }
+                    _ if members == 0 => format!(
+                        "No member runs: the swarm ends once the {waiting} reports waiting for your verdict are \
+                         judged."
+                    ),
+                    _ => format!(
+                        "{members} members still run: the swarm goes on until you stop it, finish it with a \
+                         verdict, or its time runs out."
+                    ),
+                });
+                (true, goes_on)
+            }
+            swarm => {
+                let state = swarm.map(Swarm::state_name).unwrap_or_default();
+                (false, Some(format!("The swarm has ended ({state}): tell the person what its board shows.")))
+            }
         };
-        Ok(Payload::encode(&VerdictResponse { outcome, running }))
+        let outcome = match state {
+            Some(state) => format!("{outcome} {state}"),
+            None => outcome,
+        };
+        Ok(Payload::encode(&VerdictResponse { swarm: swarm_id, outcome, running }))
     }
 
     /// Starts `name` again on its transcript with `task`; on failure it ends,
@@ -349,7 +486,7 @@ impl Service {
             Ok(request) => request,
             Err(e) => return Ok(Err(e)),
         };
-        let swarm_id = match self.session_swarm(project, session) {
+        let swarm_id = match self.session_swarm(project, session, request.swarm.as_deref(), false) {
             Ok(swarm) if swarm.running() => swarm.id.clone(),
             Ok(swarm) => return Ok(Err(invalid(format!("swarm {} has ended", swarm.id)))),
             Err(e) => return Ok(Err(e)),
@@ -360,6 +497,7 @@ impl Service {
         }
         let note = preview(&request.reason, 900);
         self.finish(kernel, &swarm_id, Outcome::Stopped, &note, false)?;
-        Ok(Payload::encode(&json!({"stopped": stopped})))
+        let outcome = self.swarms.get(&swarm_id).map(Swarm::state_name).unwrap_or_default();
+        Ok(Payload::encode(&json!({"swarm": swarm_id, "stopped": stopped, "outcome": outcome})))
     }
 }

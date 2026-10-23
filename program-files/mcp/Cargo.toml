@@ -1,0 +1,22 @@
+[package]
+name = "nucleus-mcp"
+version = "0.0.0"
+description = "MCP stdio and Streamable HTTP adapter through ordinary Nucleus capabilities."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+serde_json.workspace = true
+rmcp = { version = "=3.4.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures = "0.3"
+http = "1"
+sse-stream = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "time"] }
+
+
+[lints]
+workspace = true

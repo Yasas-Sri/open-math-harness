@@ -1,0 +1,16 @@
+[package]
+name = "nucleus-kernel"
+version = "0.0.0"
+description = "Nucleus kernel core: identity, capabilities, handles, IPC admission and dispatch, lifetimes."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-protocol.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

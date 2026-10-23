@@ -1,0 +1,23 @@
+[package]
+name = "nucleus-project"
+version = "0.0.0"
+description = "A project's own host for its repository and files, running as the projects' user."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.23"
+cap-std = "4"
+nucleus-projects-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+rustix = { version = "1", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+[package]
+name = "nucleus-discovery"
+version = "0.0.0"
+description = "The discovery harness: Dream-RSI's tree search. Owns one discovery tree per problem, runs the exploration policy, spawns one confined worker per CONTINUE with authority narrowed to its task, evaluates every submitted candidate with the lean service, and journals the tree."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Parses a task's template at `start` in the prover's environment; never renders it.
+minijinja.workspace = true
+nucleus-discovery-interface.workspace = true
+nucleus-explore-interface.workspace = true
+nucleus-lean-interface.workspace = true
+nucleus-model-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-shell-interface.workspace = true
+# Opens what a run's process wrote under `/out` without following a symlink
+# or blocking on a FIFO, and checks the opened descriptor.
+rustix = { version = "1", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+# A run's key: its project and name, digested into one resource segment.
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,89 @@
+Third-party notices for Open Math Harness
+
+Open Math Harness includes material from the projects below. Each project's
+license applies only to the material named here; the rest of this repository is
+licensed under the Apache License 2.0 (LICENSE).
+
+OpenAI Codex
+  https://github.com/openai/codex, commit c45ea25 (2026-09-20)
+  License: Apache License 2.0 (LICENSE)
+  The notice of the original:
+
+      OpenAI Codex
+      Copyright 2025 OpenAI
+
+  What was adapted: the agent prompts in prompts/templates/ and the way
+  prompts/src/ assembles them, and the memory templates in
+  memories/read/templates/ and memories/write/templates/ with the citation
+  format memories/read reads. That covers the per-model instructions and
+  personalities, the permissions texts, the guardian policy, the compaction
+  handoff, the agent role file (the swarm member's), and the memory
+  pipeline's reading, extraction and consolidation prompts.
+  These files were modified: their text is rewritten for this
+  system's tools and services, and some of Codex's wording remains.
+
+DeepSeek Harness
+  https://github.com/deepseek-ai/deepseek-harness, AGENTS.md at commit adce1b4
+  (2026-09-17)
+  License: MIT License (MIT text below)
+  The notice of the original:
+
+      Copyright (c) 2026 DeepSeek
+
+  Nucleus's design learned from it: an agent harness built as a microkernel,
+  with agent loops, models and tools as replaceable plugins. What was adapted:
+  development conventions of its AGENTS.md, rewritten for this system in
+  AGENTS.md: a capability's interface, provider and consumers; rebuilding what
+  a model was given from the session log; registrations that own their
+  release; validating input where it enters and trusting typed code inside;
+  validated configuration, fixed protocol constants and security invariants,
+  and misconfiguration that fails early; maintained dependencies over
+  hand-written code; pre-stable interfaces and the migration of released
+  data; checks matched to the changed surface.
+
+asn1-rs-impl 0.2.0
+  https://github.com/rusticata/asn1-rs/tree/a20e5f7319c896737ad0f2557037817b91ad854f
+  Copyright (c) 2017 Pierre Chifflier
+  Distributed under its MIT option (MIT text below).
+
+rmcp 3.4.0 (Model Context Protocol Rust SDK)
+  https://github.com/modelcontextprotocol/rust-sdk/tree/fd7811fdaa9fefa1c8034534b4d7a31c97204f89
+  Copyright (c) 2024-2025 Model Context Protocol a Series of LF Projects, LLC.
+  Apache-2.0 text: LICENSE. MIT text: below.
+  Upstream licensing notice:
+
+The MCP project is undergoing a licensing transition from the MIT License to the Apache
+License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the
+project are licensed under Apache-2.0. Documentation contributions (excluding
+specifications) are licensed under CC-BY-4.0.
+
+Contributions for which relicensing consent has been obtained are licensed under
+Apache-2.0. Contributions made by authors who originally licensed their work under the
+MIT License and who have not yet granted explicit permission to relicense remain
+licensed under the MIT License.
+
+No rights beyond those granted by the applicable original license are conveyed for such
+contributions.
+
+MIT License
+
+The following MIT terms apply to DeepSeek Harness, asn1-rs-impl and the MIT
+portions of rmcp identified above, with their respective copyright notices.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

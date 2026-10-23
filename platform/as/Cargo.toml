@@ -1,0 +1,14 @@
+[package]
+name = "nucleus-as"
+version = "0.0.0"
+description = "The setuid-root helper that starts a project's process as the projects' user."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1", features = ["fs", "process", "thread"] }
+
+
+[lints]
+workspace = true

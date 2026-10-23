@@ -1,0 +1,35 @@
+[Unit]
+Description=Nucleus kernel (the user's whole Nucleus in this VM)
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+# The runtime does not run as root: bubblewrap confines without it, and a
+# project's process gets the projects' user from the setuid helper nucleus-as.
+User=nucleus
+Group=nucleus
+# The platform's runtime parameters: read once at start, they fill the
+# program arguments nucleus.json declares; without the file every parameter
+# has its default.
+ExecStart=/opt/nucleus/bin/nucleus serve /etc/nucleus/nucleus.json --parameters /var/lib/nucleus/secrets/settings/parameters.json
+# A crash or an exited root service is restarted clean; long runs continue from
+# their checkpoints through discovery's `resume`. There is no in-place recovery.
+Restart=always
+RestartSec=2
+KillMode=control-group
+# The runtime starts every program in a cgroup of its own, a project's beneath
+# its project's, and stops it with cgroup.kill: programs that run as the
+# projects' user cannot be signalled by the runtime.
+Delegate=yes
+# The OOM killer ends one process and only that one: its parent sees it
+# exit, and a killed root service still makes `nucleus serve` exit and
+# restart clean. The default, stop, would stop the whole Nucleus, chat
+# included, for any of them.
+OOMPolicy=continue
+TimeoutStopSec=30
+StateDirectory=nucleus nucleus/secrets nucleus/secrets/link nucleus/secrets/model nucleus/secrets/settings nucleus/sessions nucleus/memories nucleus/memory-state nucleus/approvals-log nucleus/swarm nucleus/jobs
+StateDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

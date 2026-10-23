@@ -1,0 +1,19 @@
+[package]
+name = "nucleus-shell"
+version = "0.0.0"
+description = "Provider of the Nucleus `shell` interface: runs commands in per-workspace directories as the Linux user it runs as."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-preexec.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-shell-interface.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+rustix = { version = "1", features = ["fs"] }
+
+[lints]
+workspace = true

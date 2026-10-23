@@ -1,0 +1,16 @@
+[package]
+name = "nucleus-explore-interface"
+version = "0.0.0"
+description = "Definition of the Nucleus `explore` interface: the seam of the Dream-RSI loop between the discovery harness (which owns the tree and serves CONTINUE) and a discovery-agent worker (which resumes a node's workspace and submits one candidate)."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-lean-interface.workspace = true
+nucleus-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,46 @@
+{
+  "grace_ms": 1000,
+  "programs": {
+    "fs": {
+      "executable": "../../target/debug/nucleus-fs",
+      "args": ["--root", "/data", "--access-log", "/log/access.jsonl"],
+      "binds": [
+        {"host": "data", "guest": "/data", "writable": true},
+        {"host": "log", "guest": "/log", "writable": true}
+      ]
+    },
+    "agent": {
+      "executable": "../../target/debug/nucleus-fixture-agent",
+      "args": ["--fixture", "/fixture/agent.json", "--transcript", "/out/transcript.jsonl"],
+      "binds": [
+        {"host": "fixtures", "guest": "/fixture"},
+        {"host": "out/agent", "guest": "/out", "writable": true}
+      ]
+    },
+    "worker": {
+      "executable": "../../target/debug/nucleus-fixture-agent",
+      "args": ["--fixture", "/fixture/worker.json", "--transcript", "/out/transcript.jsonl"],
+      "binds": [
+        {"host": "fixtures", "guest": "/fixture"},
+        {"host": "out/agent/worker", "guest": "/out", "writable": true}
+      ]
+    }
+  },
+  "boot": [
+    {
+      "program": "fs",
+      "provides": "fs",
+      "grants": [
+        {"endpoint": "kernel", "actions": ["provide"], "resource": ["endpoint", "fs"], "delegable": false}
+      ]
+    },
+    {
+      "program": "agent",
+      "run_to_completion": true,
+      "grants": [
+        {"endpoint": "fs", "actions": ["read", "list", "create"], "resource": ["work"], "delegable": true},
+        {"endpoint": "kernel", "actions": ["spawn"], "resource": ["program", "worker"], "delegable": false}
+      ]
+    }
+  ]
+}

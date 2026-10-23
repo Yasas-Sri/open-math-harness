@@ -1,0 +1,185 @@
+# What each template presupposes, and whether this system provides it.
+#
+# The backtick check in `tests/tests/prompts.rs` catches a template that names a
+# tool which does not exist. It cannot catch the other direction: a template
+# that is entirely well-formed and describes a *mechanism* we have not built —
+# a swarm prompt for an agent that cannot start a swarm, a compaction pair for a
+# loop that does not compact. Those read as true and are not.
+#
+# So every template has a row here, keyed by its path under `templates/`.
+# `requires` names the tools and mechanisms it assumes. `available` is whether
+# this system has them today. The test refuses a template with no row, a row
+# with no template, a requirement that is neither a known tool nor a known
+# mechanism, and a template marked available while something it needs is
+# missing.
+#
+# A template marked `available = false` is text that is ready and not wired up.
+# That is a legitimate state — it is the honest one — but it has to be declared,
+# because prompt text is easy to write and easy to forget the assumptions of.
+
+["model_instructions/default_instructions_template.md"]
+requires = ["shell_exec"]
+available = true
+note = """
+Reading before writing, searching, editing. Needs a shell. The chat agent's
+system prompt is this template rendered for what the agent holds
+(`nucleus_chat_agent::instructions`), unless an explicit --system-prompt
+replaces it. Swarm members get it too, with their brief appended, so a rule every networked agent must follow (other people's sites:
+respect access controls and human verification, and use documented authentication and
+rate-limit mechanisms) is written here once.
+"""
+
+["personalities/pragmatic.md"]
+requires = []
+available = true
+
+["personalities/friendly.md"]
+requires = []
+available = true
+
+["permissions/sandbox_mode/read_only.md"]
+requires = []
+available = true
+
+["permissions/sandbox_mode/workspace_write.md"]
+requires = []
+available = true
+
+["permissions/approval_policy/never.md"]
+requires = []
+available = true
+
+["permissions/approval_policy/on_request.md"]
+requires = ["fs_remove", "approval-rules"]
+available = true
+note = """
+The chat agent offers fs_remove and routes it through the approvals guard when
+it does not hold the capability directly, and renders this paragraph exactly
+then. The tool's own description says a person may be asked, and its reason
+parameter is what that person reads. The text states the guard's rules, which
+decide before any person does.
+"""
+
+["guardian/policy.md"]
+requires = []
+available = true
+note = """
+Describes the capability model, which is the thing that is always true.
+Appended to every assembled chat-agent prompt.
+"""
+
+["compact/prompt.md"]
+requires = ["compaction"]
+available = true
+note = """
+The chat agent compacts; the prover resets its context without a summary.
+The chat agent summarises with this prompt when the provider's own token count
+crosses the threshold, hands the summary back with the prefix below, and posts
+a Compacted entry so the person can see that it happened.
+"""
+
+["compact/summary_prefix.md"]
+requires = ["compaction"]
+available = true
+
+["agents/roles/swarm-member.toml"]
+requires = ["swarm"]
+available = true
+note = """
+A swarm member's brief, appended to the instructions
+assembled for what the member holds. Only the swarm service starts a member, with grants it narrows to the member's own
+directory and its own slot on the `swarm` endpoint. The rules it states are
+enforced outside the model: the member's loop refuses every tool but the board
+and registration until it holds a direction, and the swarm service refuses a
+duplicate direction, a second direction, a finding or submission without one,
+and every call on another member's slot; the kernel refuses the agent's
+actions to a member.
+"""
+
+["agents/swarm/coordinator.md"]
+requires = ["swarm"]
+available = true
+note = """
+Appended to the chat agent's prompt exactly when it holds `swarm start`: the
+sessions service narrows the swarm service's agent actions to each session
+(`--session-scope swarm`). The tools themselves are the swarm service's
+declared actions; the wake-up is a conversation reminder the service sends.
+"""
+
+["agents/swarm/proactive.md"]
+requires = ["swarm"]
+available = true
+note = """
+Appended on every model request when the session selected Ultramath mode
+and the agent holds the swarm tools. It changes the starting threshold;
+the coordinator's capability, verification and stopping rules still apply.
+"""
+
+["agents/skills.md"]
+requires = ["skills_list", "skills_load"]
+available = true
+note = """
+Appended to the chat agent's prompt, with the list of skills, when the agent
+holds `skills list` and the list it read is not empty: the
+project's skills (folders of .skill/ in its repository) and the published
+ones of the catalogs the operator named. A message beginning with /skill is
+the agent's own `skills_load` call before the model's first step.
+"""
+
+["agents/background_jobs.md"]
+requires = ["shell_jobs"]
+available = true
+note = """
+Appended to the chat agent's prompt exactly when its `shell_exec` offers
+`background`, which the projects service's shell declares in the VM, where
+the session's agent holds `jobs` on its own session. The
+wake-up at a job's end is a conversation reminder the projects service sends.
+"""
+
+["agents/swarm/duplicate_check.md"]
+requires = ["swarm"]
+available = true
+note = """
+The system text of the duplicate check: one model call per registration that
+is not trivially decided, forced to answer with one tool call, without
+reasoning, counted in the swarm's budget. The proposal and the board are put
+in front of it as framed data.
+"""
+
+["suggest/next.md"]
+requires = []
+available = true
+note = """
+The system text of the suggestions service when a window wants the next
+message to offer. The conversation so far follows as one user message holding
+a transcript, so the model reads it as a record and not as its own turns;
+without tools or reasoning.
+"""
+
+["suggest/start.md"]
+requires = []
+available = true
+note = """
+The one user message of the suggestions service for a conversation with no
+message yet. The service reads nothing, so there is no remembered context to
+go on; without tools or reasoning.
+"""
+
+["suggest/title.md"]
+requires = []
+available = true
+note = """
+The system text of the suggestions service when a window wants a title for a
+conversation. The conversation's first user message follows as one user message;
+the answer is a short title only, without tools or reasoning.
+"""
+
+["suggest/skills.md"]
+requires = []
+available = true
+note = """
+Next-message suggestions with a caller-supplied catalog of skill names and short
+descriptions. The transcript and metadata are untrusted data in one user message.
+The service filters returned skill names against that catalog; selection only
+changes a draft. No skill bodies, tools, reasoning or execution authority.
+"""

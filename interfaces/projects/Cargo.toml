@@ -1,0 +1,14 @@
+[package]
+name = "nucleus-projects-interface"
+version = "0.0.0"
+description = "Definition of the Nucleus `projects` and `files` service interfaces: the person's projects (git repositories) and their files."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-protocol.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

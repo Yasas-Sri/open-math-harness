@@ -1,0 +1,20 @@
+[package]
+name = "nucleus-suggestions"
+version = "0.0.0"
+description = "Provider of the Nucleus `suggestions` interface: the message a person might send next, from its own model."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-model-interface.workspace = true
+nucleus-prompts.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-suggestions-interface.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

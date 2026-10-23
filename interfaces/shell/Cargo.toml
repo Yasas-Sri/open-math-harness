@@ -1,0 +1,15 @@
+[package]
+name = "nucleus-shell-interface"
+version = "0.0.0"
+description = "Definition of the Nucleus `shell` service interface: run a command in a workspace."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

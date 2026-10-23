@@ -1,0 +1,47 @@
+[package]
+name = "nucleus-ui"
+version = "0.0.0"
+description = "User interface service: serves every window with the capabilities this process was granted, held to the window's label."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-approvals-interface.workspace = true
+nucleus-conversation-interface.workspace = true
+nucleus-diffs-interface.workspace = true
+nucleus-discovery-interface.workspace = true
+nucleus-memory-interface.workspace = true
+nucleus-projects-interface.workspace = true
+nucleus-protocol.workspace = true
+# The scan service's endpoint, which no connection but the platform's reaches.
+nucleus-publish-interface.workspace = true
+nucleus-sdk.workspace = true
+nucleus-sessions-interface.workspace = true
+# A session's background shell jobs.
+nucleus-shell-interface.workspace = true
+nucleus-skills-interface.workspace = true
+nucleus-suggestions-interface.workspace = true
+# Read-only: a swarm's status and records, for the team's card.
+nucleus-swarm-interface.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Windows are tasks, not threads.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+# The link to the platform: QUIC, TLS 1.3 with the platform's key pinned.
+base64 = "0.22"
+# A new key in the link's file: the host renames it into place.
+futures-util = "0.3"
+inotify = "0.11"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+x509-parser = "0.18"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+# A fake platform in the tests: a self-signed certificate and its pin, and the keys it signs.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+
+[lints]
+workspace = true

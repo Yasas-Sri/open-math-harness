@@ -1,0 +1,27 @@
+[package]
+name = "nucleus-skills"
+version = "0.0.0"
+description = "Provider of the Nucleus `skills` interface: a project's skills, and loading published ones into it."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cap-std = "4"
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-skills-interface.workspace = true
+# Its fetches go through the `web` service's checks (redirects, addresses, size, time).
+nucleus-web.workspace = true
+# `openat2` beneath the root, refusing any symbolic link in the path.
+rustix = { version = "1", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+# A published skill can be a .zip of its folder.
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

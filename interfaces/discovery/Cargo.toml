@@ -1,0 +1,15 @@
+[package]
+name = "nucleus-discovery-interface"
+version = "0.0.0"
+description = "Definition of the Nucleus `discovery` interface: start, watch, stop and list Dream-RSI runs of the resident discovery harness, and the task document (version 1) that defines a run."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

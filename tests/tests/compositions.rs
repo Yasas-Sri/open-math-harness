@@ -1,0 +1,1241 @@
+//! The committed compositions are boot configurations: autostart lists of
+//! resident services with their authority and their namespaces, never a task.
+//! Each one is validated by the launcher's own loader — the same parsing and
+//! checks a real boot starts with — and its authority is compared with what
+//! this file pins. Nothing here starts a process: the VM's composition reaches
+//! a real model.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use nucleus_cli::parameters::ParamKind;
+use nucleus_cli::{BootEntry, GrantConfig, LauncherConfig, ProgramConfig};
+use nucleus_protocol::ProgramName;
+
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+fn load(relative: &str) -> LauncherConfig {
+    LauncherConfig::load(&root().join(relative)).unwrap_or_else(|why| panic!("{relative}: {why}"))
+}
+
+fn program<'a>(config: &'a LauncherConfig, name: &str) -> &'a ProgramConfig {
+    config.programs.get(&ProgramName::new(name).unwrap()).unwrap_or_else(|| panic!("program {name}"))
+}
+
+fn entry<'a>(config: &'a LauncherConfig, name: &str) -> &'a BootEntry {
+    config.boot.iter().find(|e| e.program.as_str() == name).unwrap_or_else(|| panic!("boot entry {name}"))
+}
+
+/// One grant as a comparable line: `endpoint [actions] [resource] delegable`.
+fn grant_line(grant: &GrantConfig) -> String {
+    let actions: Vec<&str> = grant.actions.iter().map(|a| a.as_str()).collect();
+    format!(
+        "{} {:?} {:?} delegable={}",
+        grant.endpoint.as_str(),
+        actions,
+        grant.resource.segments(),
+        grant.delegable
+    )
+}
+
+fn grant_lines(entry: &BootEntry) -> BTreeSet<String> {
+    entry.grants.iter().map(grant_line).collect()
+}
+
+/// `path` with its `..` segments folded lexically: the loader joins a
+/// relative host path onto the configuration's directory as written.
+fn folded(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A program's binds as `guest <- <host relative to the repository root> (rw|ro)`.
+fn bind_lines(program: &ProgramConfig) -> BTreeSet<String> {
+    let root = root().canonicalize().unwrap();
+    program
+        .binds
+        .iter()
+        .map(|b| {
+            // Hosts outside the repository (the PutnamBench checkout, the toolchain) stay absolute.
+            let host = folded(&b.host);
+            let host = host.strip_prefix(&root).map_or_else(|_| host.clone(), Path::to_path_buf);
+            format!("{} <- {} ({})", b.guest.display(), host.display(), if b.writable { "rw" } else { "ro" })
+                .replace('\\', "/")
+        })
+        .collect()
+}
+
+fn lines(list: &[&str]) -> BTreeSet<String> {
+    list.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// The pairs `flag value` among `args`, for flags that repeat.
+fn values_of<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    args.windows(2).filter(|w| w[0] == flag).map(|w| w[1].as_str()).collect()
+}
+
+/// The boot entries whose grants carry `action` on `endpoint`.
+fn holders<'a>(config: &'a LauncherConfig, endpoint: &str, action: &str) -> Vec<&'a str> {
+    config
+        .boot
+        .iter()
+        .filter(|e| {
+            e.grants
+                .iter()
+                .any(|g| g.endpoint.as_str() == endpoint && g.actions.iter().any(|a| a.as_str() == action))
+        })
+        .map(|e| e.program.as_str())
+        .collect()
+}
+
+/// Who may register a statement, wake a session or move a job in a person's
+/// name: only the discovery service registers, only the swarm service and the
+/// projects service (a background job's end) are composed with `wake`, which
+/// they cannot hand on, and only the UI service holds `jobs background`.
+fn check_statement_and_wake_authority(config: &LauncherConfig) {
+    assert_eq!(holders(config, "lean", "register"), ["discovery"]);
+    let waking = holders(config, "conversation", "wake");
+    assert!(waking.iter().all(|holder| matches!(*holder, "swarm" | "projects")), "{waking:?}");
+    // A job's move to the background, which names a person, is the window's alone.
+    let named = holders(config, "jobs", "background");
+    assert!(named.is_empty() || named == ["ui"], "jobs background: {named:?}");
+    for entry in config.boot.iter().filter(|e| waking.contains(&e.program.as_str())) {
+        let wake = entry.grants.iter().filter(|g| g.actions.iter().any(|a| a.as_str() == "wake"));
+        assert!(wake.clone().all(|g| !g.delegable), "{entry:?}");
+    }
+}
+
+/// What the swarm service holds in the VM. It provides `swarm`, starts the chat
+/// program as each member, as its project's user, and wakes sessions and
+/// records completion references; it narrows the rest to its members: the
+/// offered models, files and a shell in the projects, the web, and the member
+/// actions of its own endpoint. The sessions service hands each session's agent
+/// the agent actions on its own session.
+fn check_swarm_service(config: &LauncherConfig) {
+    assert_eq!(holders(config, "conversation", "ultramath_ended"), ["swarm"]);
+    let mut expected = lines(&[
+        r#"kernel ["provide"] ["endpoint", "swarm"] delegable=false"#,
+        r#"kernel ["spawn_executable"] ["executable", "opt", "nucleus", "bin", "nucleus-chat-agent"] delegable=false"#,
+        r#"kernel ["spawn_as"] ["identity"] delegable=false"#,
+        r#"conversation ["ultramath_ended", "wake"] [] delegable=false"#,
+        r#"fs ["append", "create", "edit", "list", "read"] ["projects"] delegable=true"#,
+        r#"shell ["exec"] ["projects"] delegable=true"#,
+        r#"web ["curl", "fetch"] [] delegable=true"#,
+        r#"swarm ["abandon", "board", "post", "progress", "register", "submit"] [] delegable=true"#,
+    ]);
+    let service = program(config, "swarm");
+    let args = &service.args;
+    assert_eq!(args.first().map(String::as_str), Some("--swarm-service"));
+    // Every model, of which the platform's `swarm_models` offers some.
+    expected.insert(r#"model ["complete"] [] delegable=true"#.to_owned());
+    assert_eq!(grant_lines(entry(config, "swarm")), expected);
+    assert_eq!(values_of(args, "--member-executable"), ["/opt/nucleus/bin/nucleus-chat-agent"]);
+    assert_eq!(
+        values_of(args, "--projects"),
+        ["/workspace/nucleus/work/projects"],
+        "members run as their project"
+    );
+    assert_eq!(
+        bind_lines(service),
+        lines(&[
+            "/opt/nucleus/bin/nucleus-chat-agent <- /opt/nucleus/bin/nucleus-chat-agent (ro)",
+            "/workspace/nucleus/work/projects <- /workspace/nucleus/work/projects (ro)",
+            "/state <- /var/lib/nucleus/swarm (rw)",
+        ])
+    );
+    // The service's own sandbox has no network. Its members are processes of
+    // their projects' users, which have the VM's.
+    assert!(!service.network);
+    let options = nucleus_chat_agent::swarm::service::Options::parse(args[1..].iter().cloned()).unwrap();
+    assert!(!options.models.is_empty(), "the platform's swarm_models");
+    assert!(
+        grant_lines(entry(config, "parent"))
+            .contains(r#"swarm ["records", "start", "status", "stop", "verdict"] [] delegable=true"#)
+    );
+    assert_eq!(values_of(&program(config, "parent").args, "--session-scope"), ["swarm", "jobs"]);
+}
+
+/// What the sessions service holds of the conversation, to narrow to each
+/// session's agent: its messages, its own log, which it continues from, and
+/// its own reminders.
+const SESSION_CONVERSATION: &str = r#"conversation ["cancel_reminder", "history", "post", "receive", "remind", "reminders"] [] delegable=true"#;
+
+/// Command-line arguments as `(flag, value)` pairs.
+type Pairs = Vec<(String, String)>;
+
+/// `args` as the discovery and prover parsers read them: every flag takes
+/// one value except `--no-usd-ceiling`.
+fn flag_pairs(args: &[String]) -> Pairs {
+    let mut pairs = Vec::new();
+    let mut args = args.iter();
+    while let Some(flag) = args.next() {
+        let value = if flag == "--no-usd-ceiling" {
+            String::new()
+        } else {
+            args.next().unwrap_or_else(|| panic!("{flag} needs a value")).clone()
+        };
+        pairs.push((flag.clone(), value));
+    }
+    pairs
+}
+
+/// A discovery program's arguments split into the service's own and each
+/// worker's (its `--prover-arg`s).
+fn discovery_and_worker_args(args: &[String]) -> (Pairs, Pairs) {
+    let (workers, service): (Pairs, Pairs) =
+        flag_pairs(args).into_iter().partition(|(f, _)| f == "--prover-arg");
+    let workers: Vec<String> = workers.into_iter().map(|(_, v)| v).collect();
+    (service, flag_pairs(&workers))
+}
+
+/// The value of `flag` among `pairs`: the last one, as the parsers take it.
+fn value<'a>(pairs: &'a [(String, String)], flag: &str) -> Option<&'a str> {
+    pairs.iter().rev().find(|(f, _)| f == flag).map(|(_, v)| v.as_str())
+}
+
+/// Each run's process is the discovery service's own program,
+/// and the kernel's limits leave room for what the service holds and
+/// forwards. It holds each `start` while the run's process admits it and
+/// each worker's `explore` call while that process answers, and it forwards
+/// every running worker's calls as one caller; otherwise workers or `status`
+/// queue behind held calls and forwards are refused as too many outstanding
+/// requests. A flag or limit left out takes its default: the service's
+/// (`program-files/discovery/src/options.rs`) or the kernel's. A stopped
+/// run's process and its workers count against `max_processes` until they
+/// are reaped, so runs stopped and started again need room beyond this bound.
+fn check_run_limits(config: &LauncherConfig) {
+    let (service, _) = discovery_and_worker_args(&program(config, "discovery").args);
+    // The service's own program, beside its workers'.
+    let (run, prover) =
+        (value(&service, "--run-executable").unwrap(), value(&service, "--prover-executable").unwrap());
+    assert_eq!(Path::new(run).file_name(), Some(std::ffi::OsStr::new("nucleus-discovery")));
+    assert_eq!(Path::new(run).parent(), Path::new(prover).parent());
+    let option = |flag: &str, default: usize| value(&service, flag).map_or(default, |v| v.parse().unwrap());
+    let queued = option("--max-queued-runs", 8);
+    let workers =
+        option("--max-running-runs", 1) * option("--max-width", 16) * option("--max-concurrency", 4);
+    let kernel = nucleus_kernel::Config::with_programs(BTreeSet::new());
+    let inflight = config.limits.max_inflight_per_endpoint.unwrap_or(kernel.max_inflight_per_endpoint);
+    let pending = config.limits.max_pending_per_caller.unwrap_or(kernel.max_pending_per_caller);
+    // Held `start`s leave a slot for `status` and `stop`, and one run's
+    // workers never wait for slots another run's workers hold.
+    assert!(
+        inflight > queued && inflight >= workers,
+        "in flight {inflight}: {queued} runs, {workers} workers"
+    );
+    // Every running worker's call, and one `admit` or `begin` per other run.
+    assert!(pending >= workers + queued, "pending {pending}: {queued} runs, {workers} workers");
+    // Every booted program, every admitted run's process and every running worker.
+    let processes = config.limits.max_processes.unwrap_or(kernel.max_processes);
+    let booted = config.boot.len();
+    assert!(
+        processes >= booted + queued + workers,
+        "processes {processes}: {booted} booted, {queued} runs, {workers} workers"
+    );
+}
+
+/// Every directory a composition binds exists in a fresh checkout.
+#[test]
+fn every_bound_directory_exists_in_a_fresh_checkout() {
+    for kept in ["examples/slice/out/agent", "examples/slice/out/agent/worker"] {
+        assert!(root().join(kept).join(".gitkeep").is_file(), "{kept}/.gitkeep");
+    }
+}
+
+/// Every composition the repository ships boots each program after the
+/// providers of the endpoints it is granted (the launcher refuses one that
+/// does not, `nucleus_cli::LauncherConfig::check_boot_order`): a handle
+/// taken before its endpoint's first provider is stale for good.
+#[test]
+fn every_shipped_composition_boots_providers_before_their_users() {
+    for config in ["deploy/vm/nucleus.json", "examples/slice/config.json"] {
+        load(config);
+    }
+}
+
+/// The VM's composition: the whole Nucleus the desktop reaches
+/// through the UI service. The window's authority is the desktop's ceiling.
+#[test]
+fn the_vm_composition_caps_the_desktop_at_the_ui_services_grants() {
+    let config = load("deploy/vm/nucleus.json");
+    assert_eq!(config.lifetime, nucleus_cli::Lifetime::Resident);
+    let ui = entry(&config, "ui");
+    assert_eq!(
+        grant_lines(ui),
+        lines(&[
+            r#"conversation ["changes", "ensure", "history", "list", "move", "queue", "say", "send_now", "wait", "withdraw"] [] delegable=false"#,
+            r#"sessions ["create", "interrupt", "list", "stop"] [] delegable=false"#,
+            r#"memory ["contents"] [] delegable=false"#,
+            // What a /skill command may name; loading is the session's agent's.
+            r#"skills ["list"] ["projects"] delegable=false"#,
+            r#"approvals ["decide", "list"] [] delegable=false"#,
+            r#"discovery ["list", "problems", "status", "stop", "tree"] [] delegable=false"#,
+            r#"suggestions ["next", "title"] [] delegable=false"#,
+            r#"diffs ["changes", "file", "repositories"] ["projects"] delegable=false"#,
+            // A project's Stop ends every process of it.
+            r#"projects ["create", "list", "stop"] ["projects"] delegable=false"#,
+            // Lifecycle workflows belong to the UI service;
+            // a window cannot invoke their internal steps.
+            r#"projects ["archive", "begin_archive", "delete", "purge", "unarchive"] ["projects"] delegable=false"#,
+            r#"files ["bundle_import", "bundle_out", "bundle_read", "bundle_write", "download", "git_initialize", "git_remote", "git_state", "list", "mkdir", "remove", "rename", "upload"] ["projects"] delegable=false"#,
+            // A session's running command moved to the background.
+            r#"jobs ["background"] [] delegable=false"#,
+            // The scan of a session's records, for the platform's mirror.
+            r#"publish ["findings"] [] delegable=false"#,
+            // A deleted project's records go from every service that keeps
+            // them, each asked by the deletion workflow alone, which no
+            // connection reaches. A team's window reads a session's swarms,
+            // read-only (`status`, `records`).
+            r#"sessions ["forget"] [] delegable=false"#,
+            r#"swarm ["forget", "records", "status", "stop"] [] delegable=false"#,
+            r#"discovery ["forget", "stop"] [] delegable=false"#,
+            r#"memory ["forget", "stop"] [] delegable=false"#,
+            r#"approvals ["forget"] [] delegable=false"#,
+            r#"conversation ["forget"] [] delegable=false"#,
+        ])
+    );
+    // The UI service reads the link's configuration and dials the platform.
+    let ui = program(&config, "ui");
+    assert_eq!(bind_lines(ui), lines(&["/link <- /var/lib/nucleus/secrets/link (ro)"]));
+    assert_eq!(ui.args, ["--link", "/link/platform.json"]);
+    assert!(ui.network, "{ui:?}");
+    check_conversation_room(&config);
+    // Suggestions cannot act or speak in a session: the service holds its own
+    // models and its endpoint, and sees nothing but what the window sends it.
+    assert_eq!(
+        grant_lines(entry(&config, "suggestions")),
+        lines(&[
+            r#"kernel ["provide"] ["endpoint", "suggestions"] delegable=false"#,
+            r#"model ["complete"] [] delegable=false"#,
+        ])
+    );
+    let suggestions = program(&config, "suggestions");
+    assert!(suggestions.binds.is_empty() && !suggestions.network, "{suggestions:?}");
+    // The scan of the sessions' records is a service that only reads: the
+    // conversations' history, not delegable, no network, nothing to write.
+    // Only the UI service holds its action, for the platform's mirror.
+    assert_eq!(
+        grant_lines(entry(&config, "publish")),
+        lines(&[
+            r#"kernel ["provide"] ["endpoint", "publish"] delegable=false"#,
+            r#"conversation ["history"] [] delegable=false"#,
+        ])
+    );
+    let publish = program(&config, "publish");
+    assert!(!publish.network, "{publish:?}");
+    assert!(publish.binds.is_empty() && publish.args.is_empty(), "the scan has no secret: {publish:?}");
+    for action in nucleus_publish_interface::ACTIONS {
+        assert_eq!(holders(&config, "publish", action), ["ui"], "{action}");
+    }
+    // Each secret is one sandbox's, read-only: the model key the adapter's,
+    // which calls models with it; the link's configuration the UI service's,
+    // which dials the link. No other program binds anything of the secrets.
+    for (name, spec) in &config.programs {
+        let secrets: Vec<String> = spec
+            .binds
+            .iter()
+            .filter(|bind| bind.host.starts_with("/var/lib/nucleus/secrets"))
+            .map(|bind| format!("{} {}", bind.host.display(), bind.writable))
+            .collect();
+        let expected: &[&str] = match name.as_str() {
+            "model" => &["/var/lib/nucleus/secrets/model false"],
+            "ui" | "github" => &["/var/lib/nucleus/secrets/link false"],
+            _ => &[],
+        };
+        assert_eq!(secrets, expected, "{name}");
+    }
+    assert_eq!(values_of(&program(&config, "model").args, "--key-file"), ["/model/key"]);
+    let unit = std::fs::read_to_string(root().join("deploy/vm/nucleus.service")).unwrap();
+    assert!(
+        unit.contains(" nucleus/secrets/link nucleus/secrets/model nucleus/secrets/settings "),
+        "the unit makes the secrets' directories and the parameters'"
+    );
+    let github = program(&config, "github");
+    assert_eq!(github.args, ["github", "/link/platform.json"]);
+    assert!(github.network);
+    assert_eq!(bind_lines(github), lines(&["/link <- /var/lib/nucleus/secrets/link (ro)"]));
+    assert_eq!(
+        grant_lines(entry(&config, "github")),
+        lines(&[
+            r#"kernel ["provide"] ["endpoint", "github"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "platform"] delegable=false"#,
+        ])
+    );
+    assert_eq!(holders(&config, "github", "fetch"), ["parent"]);
+    for action in ["pull_request", "issue", "fetch_pull_request"] {
+        assert_eq!(holders(&config, "github", action), ["parent"]);
+    }
+    // The link broker also serves `platform_request`, which only chat sessions hold.
+    assert_eq!(holders(&config, "platform", "request"), ["parent"]);
+    for (name, spec) in &config.programs {
+        assert!(spec.executable.starts_with("/opt/nucleus/bin"), "{name}");
+    }
+    // The programs that call models may call every one: which ones they offer
+    // or use is the platform's parameters'.
+    assert_eq!(
+        holders(&config, "model", "complete"),
+        ["memory", "swarm", "discovery", "parent", "suggestions"]
+    );
+    // The sessions service sees the projects directory only to name the project
+    // each agent runs as: read-only, at its real path, which is the path it
+    // tells the agent. It writes nothing.
+    let parent = program(&config, "parent");
+    assert_eq!(
+        bind_lines(parent),
+        lines(&[
+            "/workspace/nucleus/work/projects <- /workspace/nucleus/work/projects (ro)",
+            "/opt/nucleus/bin/nucleus-chat-agent <- /opt/nucleus/bin/nucleus-chat-agent (ro)",
+        ])
+    );
+    assert!(grant_lines(entry(&config, "parent")).contains(SESSION_CONVERSATION));
+    // No program of the runtime's reads or writes a project's files: only
+    // the projects' own processes do, as their user. The services that start
+    // them see the projects directory to name a project, and the
+    // conversation service to make sessions only for an active project, and
+    // memory to schedule work only for an active project. The
+    // projects service alone writes it for lifecycle transitions. None binds
+    // a project's folder or the projects' shared home.
+    for (name, spec) in &config.programs {
+        for bind in &spec.binds {
+            assert!(!bind.host.starts_with("/workspace/nucleus/work/home"), "{name}: {bind:?}");
+            if bind.host.starts_with("/workspace/nucleus/work/projects") {
+                let seers = ["projects", "parent", "discovery", "swarm", "conversation", "memory"];
+                assert!(seers.contains(&name.as_str()), "{name}");
+                assert_eq!(bind.host, Path::new("/workspace/nucleus/work/projects"), "{name}");
+                assert_eq!(bind.writable, name.as_str() == "projects", "{name}: {bind:?}");
+            }
+        }
+    }
+    check_real_paths(&config);
+    check_statement_and_wake_authority(&config);
+    check_swarm_service(&config);
+    // The discovery service and its workers. A run's process and its workers
+    // are the runtime's own, sandboxed: the service holds no `spawn_as`, and
+    // the runs directory, where the journals are, is bound into no program that
+    // starts a project's processes. The workers' commands run in the project's
+    // own shell, or in the shell with network for a run whose task chooses it.
+    let vm_discovery = lines(&[
+        r#"kernel ["provide"] ["endpoint", "discovery"] delegable=false"#,
+        r#"kernel ["provide"] ["endpoint", "explore"] delegable=false"#,
+        // The kernel refuses creation authority that is not delegable; the
+        // service delegates none of it.
+        r#"kernel ["create_endpoint"] ["endpoint"] delegable=true"#,
+        // Its programs are where the VM has them: what it reports names real paths.
+        r#"kernel ["spawn_executable"] ["executable", "opt", "nucleus", "bin"] delegable=true"#,
+        // Every model, of which the platform's `discovery_model` is the
+        // workers'; `start`, `next` and `cancel` beside `complete`: a worker
+        // that cannot pull a stream cannot tell a thinking provider from a
+        // stalled one.
+        r#"model ["cancel", "complete", "next", "start"] [] delegable=true"#,
+        r#"lean ["analyze", "check", "complete", "statement", "verify"] [] delegable=true"#,
+        // A run's frozen statements are registered by the run's own process,
+        // on a narrowing to `[key]` (the run's key) it cannot delegate, so the kernel keeps
+        // that out of every worker's reach: what a candidate is judged
+        // against never comes from the side that writes it.
+        r#"lean ["register"] [] delegable=true"#,
+        // A deleted project's runs' statements go: the service's own.
+        r#"lean ["forget"] [] delegable=false"#,
+        r#"explore ["assignment", "publish_plan", "read_plans", "submit"] [] delegable=true"#,
+        r#"prover-shell ["exec"] ["projects"] delegable=true"#,
+        r#"prover-shell-net ["exec"] ["projects"] delegable=true"#,
+    ]);
+    assert_eq!(grant_lines(entry(&config, "discovery")), vm_discovery);
+    let discovery_args = &program(&config, "discovery").args;
+    assert_eq!(values_of(discovery_args, "--projects"), ["/workspace/nucleus/work/projects"]);
+    assert_eq!(values_of(discovery_args, "--out"), ["/workspace/nucleus/runs"]);
+    // A task's files are in the bundle's share, which every user can read.
+    assert_eq!(values_of(discovery_args, "--tasks-dir"), ["/opt/nucleus/share"]);
+    assert_eq!(values_of(discovery_args, "--policies-dir"), ["/opt/nucleus/share/policies"]);
+    for bind in &program(&config, "discovery").binds {
+        assert_eq!(bind.guest, bind.host, "the service names paths as the VM has them");
+    }
+    for (name, spec) in &config.programs {
+        let runs = spec.binds.iter().any(|b| b.host.starts_with("/workspace/nucleus/runs"));
+        assert_eq!(runs, name.as_str() == "discovery", "{name}: only discovery sees the runs' records");
+    }
+    check_run_limits(&config);
+    check_worker_shell(&config);
+    check_writable_binds_exist_at_boot(&config);
+    check_what_a_project_user_reaches();
+    check_projects_user(&config);
+    check_projects_service(&config);
+}
+
+/// Every watched session's pending `wait` (the UI service makes one for all
+/// the windows watching it) and every live agent's pending `receive` hold one
+/// of the conversation endpoint's slots; the calls that answer them need
+/// more, or a message waits for a window to give up its slot.
+fn check_conversation_room(config: &LauncherConfig) {
+    let inflight = config.limits.max_inflight_per_endpoint.unwrap();
+    let parked = nucleus_conversation_interface::MAX_WAITS + nucleus_chat_agent::sessions::MAX_SESSIONS;
+    assert!(inflight > parked, "{inflight} in flight, {parked} parked");
+}
+
+/// Every path the VM's composition tells an agent or a person is a real path of
+/// the VM: a project's processes are in no sandbox, so a name that existed only
+/// as a mount would name nothing, and no argument of these programs names
+/// one.
+fn check_real_paths(config: &LauncherConfig) {
+    let old = [
+        "/project",
+        "/public",
+        "/pb",
+        "/lean",
+        "/cslib",
+        "/docs",
+        "/programs",
+        "/program-files",
+        "/out",
+        "/tasks",
+    ];
+    let names_old = |text: &str| {
+        old.iter().copied().find(|name| {
+            text.match_indices(name).any(|(at, _)| {
+                let before = text[..at].chars().next_back();
+                let after = text[at + name.len()..].chars().next();
+                // A whole path of its own, not the tail of a longer one.
+                before.is_none_or(|c| !(c.is_alphanumeric() || "/-_.".contains(c)))
+                    && after.is_none_or(|c| !(c.is_alphanumeric() || "-_".contains(c)))
+            })
+        })
+    };
+    for name in ["projects", "parent", "swarm", "discovery", "lean"] {
+        for arg in &program(config, name).args {
+            assert_eq!(names_old(arg), None, "{name}: {arg}");
+        }
+    }
+    // A session's agent is told the paths its shell prints.
+    let parsed = nucleus_chat_agent::Options::parse(program(config, "parent").args.iter().cloned()).unwrap();
+    let context = parsed.execution_context.unwrap();
+    assert_eq!(context.workspace_dir, "/workspace/nucleus/work/projects/default/repo");
+    assert_eq!(context.python_executable.as_deref(), Some("/usr/bin/python3"));
+    // Lean prints the toolchain's paths as a shell sees them.
+    let lean = program(config, "lean");
+    assert_eq!(values_of(&lean.args, "--workspace"), ["/opt/mathlib"]);
+    assert!(bind_lines(lean).contains("/opt/mathlib <- /opt/mathlib (ro)"));
+}
+
+/// The projects service starts each project's hosts as the project, ordinary
+/// processes of the projects' user that take no binds, and stops every process
+/// of a project through the kernel: it writes only the projects directory (its
+/// markers, a deleted project's rename), sees its host executables one by one,
+/// and hands its hosts the environment the agent's shell has. The kernel's
+/// limits leave room for every host of every active project, every call it may
+/// forward and every room of the window.
+fn check_projects_service(config: &LauncherConfig) {
+    let service = program(config, "projects");
+    let args = &service.args;
+    let identities = config.identities.as_ref().unwrap();
+    assert_eq!(values_of(args, "--identities"), ["on"]);
+    let writable: BTreeSet<String> =
+        bind_lines(service).into_iter().filter(|line| line.ends_with("(rw)")).collect();
+    assert_eq!(
+        writable,
+        lines(&[
+            "/workspace/nucleus/work/projects <- /workspace/nucleus/work/projects (rw)",
+            "/jobs <- /var/lib/nucleus/jobs (rw)",
+        ])
+    );
+    // A folder's path is one for the service and for the project's processes.
+    assert_eq!(values_of(args, "--root"), ["/workspace/nucleus/work/projects"]);
+    assert_eq!(values_of(args, "--home"), ["/workspace/nucleus/work/home"]);
+    // The background jobs' records, which a restart marks interrupted.
+    assert_eq!(values_of(args, "--jobs"), ["/jobs"]);
+    let executables: Vec<&Path> = service
+        .binds
+        .iter()
+        .filter(|b| b.guest.starts_with("/opt/nucleus/bin"))
+        .map(|b| b.host.as_path())
+        .collect();
+    let hosts =
+        ["project", "fs", "shell", "pdf", "skills", "diffs"].map(|h| format!("/opt/nucleus/bin/nucleus-{h}"));
+    assert_eq!(executables, hosts.iter().map(Path::new).collect::<Vec<_>>());
+    assert_eq!(service.binds.len(), hosts.len() + 2, "nothing else: a host needs no bind");
+    // The toolchain is where the image has it, first on the environment's PATH.
+    assert!(values_of(args, "--env").iter().any(|e| e.starts_with("PATH=/opt/lean/bin:")), "{args:?}");
+    // A project's process has the VM's network because it is the project's
+    // user's, not because the service that starts it has any.
+    assert!(!service.network && !program(config, "parent").network, "neither uses the network itself");
+    assert_eq!(
+        grant_lines(entry(config, "projects")),
+        lines(&[
+            r#"kernel ["provide"] ["endpoint", "projects"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "files"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "fs"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "shell"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "pdf"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "skills"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "diffs"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "prover-shell"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "prover-shell-net"] delegable=false"#,
+            r#"kernel ["provide"] ["endpoint", "jobs"] delegable=false"#,
+            // A background job's end wakes its session.
+            r#"conversation ["wake"] [] delegable=false"#,
+            r#"kernel ["create_endpoint"] ["endpoint"] delegable=true"#,
+            r#"kernel ["spawn_executable"] ["executable", "opt", "nucleus", "bin"] delegable=false"#,
+            r#"kernel ["spawn_as"] ["identity"] delegable=false"#,
+            // A project's Stop, and its purge, end every process of it.
+            r#"kernel ["stop_project"] ["identity"] delegable=false"#,
+        ])
+    );
+    // Nothing but the UI service, which deletes projects, forgets one (and
+    // discovery, its runs' statements at the Lean service).
+    for boot in &config.boot {
+        let forgets = boot.grants.iter().any(|g| g.actions.iter().any(|a| a.as_str() == "forget"));
+        assert_eq!(forgets, matches!(boot.program.as_str(), "ui" | "discovery"), "{}", boot.program);
+    }
+    // Every service of the order is asked.
+    let asked: Vec<&str> = entry(config, "ui")
+        .grants
+        .iter()
+        .filter(|g| g.actions.iter().any(|a| a.as_str() == "forget"))
+        .map(|g| g.endpoint.as_str())
+        .collect();
+    assert_eq!(asked.iter().copied().collect::<BTreeSet<_>>(), nucleus_ui::FORGET_ORDER.into());
+    let kernel = nucleus_kernel::Config::with_programs(BTreeSet::new());
+    let limits = &config.limits;
+    let pending = limits.max_pending_per_caller.unwrap_or(kernel.max_pending_per_caller);
+    assert!(pending >= nucleus_projects::MAX_FORWARDS, "the service forwards as one caller");
+    assert!(pending >= nucleus_ui::MAX_PENDING, "every room of the window");
+    // Every kind of host of every project that may be active at once.
+    let hosts = identities.max_active * nucleus_projects::Kind::ALL.len();
+    let handles = limits.max_handles_per_process.unwrap_or(kernel.max_handles_per_process);
+    assert!(handles >= 2 * hosts + 64, "two handles per host and its own");
+    // Every host, beside the booted programs, the sessions' agents, their
+    // plugins, swarm members and the runs.
+    let processes = limits.max_processes.unwrap_or(kernel.max_processes);
+    assert!(processes >= config.boot.len() + hosts + 256, "{processes}");
+    // Every active project's calls on their way to its hosts, each host's
+    // endpoint served by one process, the router's by many callers.
+    assert!(pending >= nucleus_projects::MAX_FORWARDS + 64, "and the router's own calls");
+    let inflight = limits.max_inflight_per_endpoint.unwrap_or(kernel.max_inflight_per_endpoint);
+    assert!(inflight >= 4 * identities.max_active, "{inflight}: a few calls of each active project at once");
+}
+
+/// The projects' user is named twice: by the setuid helper's root-owned policy,
+/// and by `activate`, which makes it with its fixed uid and home, the shared
+/// home the projects service hands its hosts, and refuses it cron and at. If
+/// they disagree, no project's process starts (the helper finds no such user)
+/// or one runs with another home.
+fn check_projects_user(config: &LauncherConfig) {
+    let identities = config.identities.as_ref().expect("the VM runs projects' processes");
+    assert_eq!(identities.helper, std::path::Path::new("/opt/nucleus/bin/nucleus-as"));
+    assert_eq!(identities.max_active, 96, "at most 96 projects with processes at once");
+    let read = |file: &str| std::fs::read_to_string(root().join("deploy/vm").join(file)).unwrap();
+    let policy = nucleus_as::Policy::parse(&read("nucleus-as.conf")).unwrap();
+    assert_eq!((policy.runtime_user.as_str(), policy.user.as_str()), ("nucleus", "projects"));
+    let home = values_of(&program(config, "projects").args, "--home")[0].to_owned();
+    let activate = read("activate");
+    assert!(activate.lines().any(|l| l == format!("home={home}")), "activate makes the shared home");
+    for line in [
+        "getent group projects >/dev/null || groupadd --gid 61000 projects ||",
+        "    useradd --uid 61000 --gid projects --home-dir \"$home\" --no-create-home --shell /usr/sbin/nologin \\",
+        "for deny in /etc/cron.deny /etc/at.deny; do",
+        "put \"$deploy/nucleus-as.conf\" /etc/nucleus/nucleus-as.conf",
+    ] {
+        assert!(activate.lines().any(|l| l == line), "activate: {line}");
+    }
+    assert!(read("nucleus.service").contains("\nDelegate=yes\n"), "programs get cgroups of their own");
+}
+
+/// The shells the VM's discovery workers run model-written commands in: each
+/// project's own, hosts of the projects service in the project's runs, as the
+/// project's user. There are two: `prover-shell`, started without network, and
+/// `prover-shell-net`, which has it. Which a run's workers get is a parameter:
+/// the composition's default (`--worker-network` of the discovery service, off
+/// here, so that a result is not looked up) unless the run's task chooses with
+/// `worker_network`. Each shell declares its own network to the workers; the
+/// operator's words fix none. Both have the toolchain and the Mathlib name
+/// index at the VM's own paths, and the operator's environment.
+fn check_worker_shell(config: &LauncherConfig) {
+    let projects = program(config, "projects");
+    assert!(!config.programs.contains_key(&nucleus_e2e::program("prover-shell")), "no shared workers' shell");
+    let shell_args: Vec<String> =
+        values_of(&projects.args, "--prover-shell-arg").into_iter().map(str::to_owned).collect();
+    assert!(
+        !shell_args.iter().any(|a| a == "--root" || a == "--endpoint" || a == "--network"),
+        "the service chooses these"
+    );
+    assert!(values_of(&shell_args, "--env").contains(&"FUNCNEST=32"), "bounded shell-function recursion");
+    assert!(
+        values_of(&shell_args, "--env").iter().any(|e| e.starts_with("LEAN_PATH=/opt/mathlib/")),
+        "Lean finds Mathlib"
+    );
+    let described = values_of(&shell_args, "--description");
+    assert!(described.len() == 1 && described[0].contains("/opt/nucleus/docs/names.tsv"), "{described:?}");
+    for fixed in ["has no network", "no network:", "has direct access to the VM network"] {
+        assert!(!projects.args.iter().any(|a| a.contains(fixed)), "{fixed:?} is said by each shell alone");
+    }
+    let hosts = nucleus_projects::Options::parse(projects.args.clone()).unwrap().hosts;
+    assert!(hosts.prover_shell_description.contains(nucleus_shell_interface::NETWORK_OFF));
+    assert!(hosts.prover_shell_net_description.contains(nucleus_shell_interface::NETWORK_ON));
+    for endpoint in ["prover-shell", "prover-shell-net"] {
+        let provide = format!(r#"kernel ["provide"] ["endpoint", "{endpoint}"] delegable=false"#);
+        assert!(grant_lines(entry(config, "projects")).contains(&provide), "{endpoint}");
+    }
+    // The default is off, and the shell with network is a run's only by its
+    // task's choice.
+    let discovery = &program(config, "discovery").args;
+    assert_eq!(values_of(discovery, "--worker-network"), ["off"], "a result is not looked up");
+    assert_eq!(values_of(discovery, "--network-shell-endpoint"), ["prover-shell-net"]);
+    // The Lean service runs in its sandbox and binds CSLib: an image without
+    // CSLib has no /opt/cslib, and a missing bind source fails the boot, so
+    // `activate` makes the directory.
+    let activate = std::fs::read_to_string(root().join("deploy/vm/activate")).unwrap();
+    assert!(activate.lines().any(|l| l == "install -d -m 0755 /opt/cslib"), "activate makes /opt/cslib");
+    // The service delegates on that shell and hands its workers the same one
+    // (`--shell-endpoint`), where they look for their workspace.
+    let (service, workers) = discovery_and_worker_args(&program(config, "discovery").args);
+    assert_eq!(value(&service, "--shell-endpoint"), Some("prover-shell"));
+    // A command a worker runs without its own timeout fits in the wall clock
+    // the worker has per model call.
+    let number =
+        |pairs: &[(String, String)], flag: &str| -> u64 { value(pairs, flag).unwrap().parse().unwrap() };
+    assert!(number(&workers, "--bash-timeout-ms") < number(&service, "--worker-timeout-ms"));
+}
+
+/// Every writable directory the VM composition binds exists before the kernel
+/// boots, since a missing bind source fails the boot: `activate` creates the
+/// workspaces, the unit's `StateDirectory` the rest.
+fn check_writable_binds_exist_at_boot(config: &LauncherConfig) {
+    let read = |file: &str| std::fs::read_to_string(root().join("deploy/vm").join(file)).unwrap();
+    let unit = read("nucleus.service");
+    let unit_dirs = |key: &str, under: &str| -> Vec<String> {
+        unit.lines()
+            .filter_map(|l| l.strip_prefix(key))
+            .flat_map(str::split_whitespace)
+            .map(|d| format!("{under}/{d}"))
+            .collect()
+    };
+    // Only what an `install -d` of `activate` creates counts: a path the
+    // script merely mentions (a test, a comment) creates nothing.
+    let mut made: BTreeSet<String> = activate_dirs().into_keys().collect();
+    made.extend(unit_dirs("StateDirectory=", "/var/lib"));
+    for (name, spec) in &config.programs {
+        for bind in spec.binds.iter().filter(|b| b.writable) {
+            let host = bind.host.to_str().unwrap();
+            assert!(made.contains(host), "{name}: nothing creates {host} before boot");
+        }
+    }
+}
+
+/// What Unix permissions carry alone: a project's process is an ordinary
+/// process of the projects' user. It reaches the projects directory and its
+/// shared home by path, so every directory `activate` makes on the way lets
+/// others traverse it, and the two are its own: the projects directory through
+/// its group, beside the runtime that owns it, the home as its owner. That is
+/// all others get there: in a directory they may traverse, every other
+/// directory `activate` makes lets them traverse at most. The runs' records and
+/// the scratch directory are the runtime's alone, like its state, and what the
+/// runtime itself creates is private (its unit's umask and directory modes).
+fn check_what_a_project_user_reaches() {
+    let given = activate_dirs();
+    let last = |dir: &str| {
+        given.get(dir).and_then(|made| made.last()).unwrap_or_else(|| panic!("activate makes no {dir}"))
+    };
+    // A running project's process resolves its paths through these at any
+    // moment, so no activation may close one even between two commands.
+    for dir in ["/workspace/nucleus", "/workspace/nucleus/work"] {
+        for made in &given[dir] {
+            assert!(
+                made.mode & 0o001 != 0,
+                "a project's process cannot traverse {dir} while it is {:o}",
+                made.mode
+            );
+        }
+    }
+    let projects = last("/workspace/nucleus/work/projects");
+    assert_eq!(
+        (projects.owner.as_deref(), projects.group.as_deref(), projects.mode),
+        (Some("nucleus"), Some("projects"), 0o770),
+        "the runtime's, and the projects' through their group"
+    );
+    let home = last("/workspace/nucleus/work/home");
+    assert_eq!((home.owner.as_deref(), home.mode), (Some("projects"), 0o700), "the projects' home");
+    for closed in ["/workspace/nucleus/runs", "/workspace/nucleus/scratch"] {
+        assert_eq!(last(closed).mode & 0o077, 0, "{closed} is the runtime's alone");
+    }
+    let modes: BTreeMap<&str, u32> =
+        given.iter().map(|(dir, made)| (dir.as_str(), made[made.len() - 1].mode)).collect();
+    for (dir, mode) in modes.iter().filter(|(dir, _)| dir.starts_with("/workspace/")) {
+        let parent = Path::new(dir).parent().and_then(|p| modes.get(p.to_str().unwrap()));
+        if parent.is_some_and(|parent| parent & 0o001 != 0) {
+            assert!(
+                mode & 0o006 == 0,
+                "{dir} ({mode:o}) is open to a project's process that guesses its name"
+            );
+        }
+    }
+    // The checks made as the projects' user come before anything the running
+    // runtime uses is stopped or replaced, so one that fails leaves it alone.
+    let activate = std::fs::read_to_string(root().join("deploy/vm/activate")).unwrap();
+    let at = |text: &str| activate.find(text).unwrap_or_else(|| panic!("activate has no `{text}`"));
+    let checked = at("\n$as_projects /usr/bin/bwrap ").max(at("$as_projects test -w \"$trusted\""));
+    // Processes are hidden between users from boot only once a running VM
+    // was seen to work that way, and before the runtime is switched.
+    let hidden = at("mount -o remount,nosuid,nodev,noexec,hidepid=2 /proc");
+    let durable = at("entry='proc /proc proc nosuid,nodev,noexec,hidepid=2 0 0'");
+    assert!(checked < hidden && hidden < durable && durable < at("systemctl stop "), "hidepid's place");
+    for change in ["systemctl stop ", "\nlink \"$bundle/bin\"", "\nput \"$deploy/nucleus.json\""] {
+        assert!(checked < at(change), "`{}` comes before the checks", change.trim());
+    }
+    let unit = std::fs::read_to_string(root().join("deploy/vm/nucleus.service")).unwrap();
+    for line in ["UMask=0077", "StateDirectoryMode=0700"] {
+        assert!(unit.lines().any(|l| l == line), "{line}: what the runtime keeps is its own");
+    }
+}
+
+/// One directory `activate` makes or changes: its mode, and its owner and
+/// group when it names them.
+struct Made {
+    mode: u32,
+    owner: Option<String>,
+    group: Option<String>,
+}
+
+/// Every mode `activate` gives each directory it makes, in order: every
+/// `install -d … -m MODE path…` (with its `-o` and `-g`), a path being
+/// written out or a `"$name"` the script set with `name=/path`, and any
+/// later `chmod MODE path…`.
+fn activate_dirs() -> BTreeMap<String, Vec<Made>> {
+    let activate = std::fs::read_to_string(root().join("deploy/vm/activate")).unwrap();
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    let mut made: BTreeMap<String, Vec<Made>> = BTreeMap::new();
+    for line in activate.lines().map(str::trim) {
+        if let Some((name, path)) = line.split_once('=').filter(|(n, p)| {
+            n.chars().all(|c| c.is_ascii_lowercase()) && p.starts_with('/') && !p.contains(' ')
+        }) {
+            names.insert(format!("\"${name}\""), path.to_owned());
+            continue;
+        }
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let paths = |words: &[&str]| -> Vec<String> {
+            let path =
+                |w: &&str| names.get(*w).cloned().or_else(|| w.starts_with('/').then(|| (*w).to_owned()));
+            words.iter().rev().map_while(path).collect()
+        };
+        let flag = |words: &[&str], flag: &str| {
+            words.iter().skip_while(|w| **w != flag).nth(1).map(|w| (*w).to_owned())
+        };
+        let found = if let Some(at) = words.windows(2).position(|w| w == ["install", "-d"]) {
+            flag(&words[at..], "-m").map(|mode| (mode, flag(&words[at..], "-o"), flag(&words[at..], "-g")))
+        } else if words.first() == Some(&"chmod") {
+            words
+                .get(1)
+                .filter(|mode| mode.chars().all(|c| c.is_digit(8)))
+                .map(|mode| ((*mode).to_owned(), None, None))
+        } else {
+            None
+        };
+        if let Some((mode, owner, group)) = found {
+            for path in paths(&words) {
+                let mode = u32::from_str_radix(&mode, 8).unwrap();
+                made.entry(path).or_default().push(Made { mode, owner: owner.clone(), group: group.clone() });
+            }
+        }
+    }
+    made
+}
+
+/// No value the VM's parameters admit stops the runtime. A program given a
+/// model holds every model, so it never refuses to start offering one it
+/// holds nothing for. At every integer's bounds and every word a parameter
+/// allows, the sessions and swarm services' own startup checks and a new
+/// session's agent accept their arguments, the kernel's limits leave the
+/// discovery workers room, and the shell's maximum never cuts the default
+/// timeout its description states.
+#[test]
+fn the_vm_parameters_cannot_stop_the_runtime() {
+    let path = root().join("deploy/vm/nucleus.json");
+    let config = load("deploy/vm/nucleus.json");
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut given: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (name, program) in written["programs"].as_object().unwrap() {
+        for arg in program["args"].as_array().into_iter().flatten() {
+            if let Some(parameter) = arg.get("param").or_else(|| arg.get("each")).and_then(|p| p.as_str()) {
+                given.entry(parameter).or_default().insert(name);
+            }
+        }
+    }
+    for (name, spec) in &config.parameters {
+        if !matches!(spec.kind, ParamKind::Model | ParamKind::ModelList) {
+            continue;
+        }
+        for program in &given[name.as_str()] {
+            let every = entry(&config, program).grants.iter().any(|g| {
+                g.endpoint.as_str() == "model"
+                    && g.actions.iter().any(|a| a.as_str() == "complete")
+                    && g.resource.segments().is_empty()
+            });
+            assert!(every, "{program}, given {name}, holds `model complete` on every model");
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let with = |values: serde_json::Map<String, serde_json::Value>| {
+        let file = dir.path().join("parameters.json");
+        std::fs::write(&file, serde_json::json!({"v": 1, "values": values}).to_string()).unwrap();
+        LauncherConfig::load_with(&path, Some(&file), |event| panic!("{event:?}")).unwrap()
+    };
+    let mut cases = Vec::new();
+    let bounds: [fn(&nucleus_cli::ParamSpec) -> Option<i64>; 2] = [|spec| spec.min, |spec| spec.max];
+    for bound in bounds {
+        let values =
+            config.parameters.iter().filter_map(|(name, spec)| Some((name.to_string(), bound(spec)?.into())));
+        cases.push(with(values.collect()));
+    }
+    for (name, spec) in &config.parameters {
+        for word in spec.one_of.iter().flatten() {
+            cases.push(with([(name.to_string(), word.as_str().into())].into_iter().collect()));
+        }
+    }
+    for config in &cases {
+        check_run_limits(config);
+        let shell: Vec<String> = values_of(&program(config, "projects").args, "--shell-arg")
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let timeout = |flag: &str| values_of(&shell, flag)[0].parse::<u64>().unwrap();
+        assert!(timeout("--default-timeout-ms") <= timeout("--max-timeout-ms"));
+        let swarm = &program(config, "swarm").args;
+        nucleus_chat_agent::swarm::service::Options::parse(swarm[1..].iter().cloned()).unwrap();
+        let parent =
+            nucleus_chat_agent::Options::parse(program(config, "parent").args.iter().cloned()).unwrap();
+        let mut agent = parent.child_args.clone();
+        agent.extend(["--model".to_owned(), "deepseek/deepseek-v4.1-flash".to_owned()]);
+        nucleus_chat_agent::Options::parse(agent).unwrap();
+    }
+}
+
+/// The VM's parent program starts a session's agent under the real kernel's
+/// attenuation rules, with the grants `sessions create` builds from the VM's
+/// parent grants: a narrowing the kernel admits, to the session's project. It
+/// runs the model its `create` names.
+#[test]
+fn the_vm_parent_starts_a_session_agent_narrowed_to_its_session() {
+    use nucleus_chat_agent::sessions;
+    use nucleus_conversation_interface as conv;
+    use nucleus_kernel::{CapSpec, Config, Kernel, Namespace, NamespaceBind, Output};
+    use nucleus_protocol::{
+        FromKernel, HandleInfo, ProcessId, RequestId, ResourcePath, ResponseBody, ToKernel,
+    };
+
+    let config = load("deploy/vm/nucleus.json");
+    let mut limits = Config::with_programs(config.programs.keys().cloned().collect());
+    limits.projects = config.identities.is_some();
+    for (name, spec) in &config.programs {
+        let binds = spec
+            .binds
+            .iter()
+            .map(|b| NamespaceBind {
+                path: b.guest.to_string_lossy().into_owned(),
+                source: b.host.clone(),
+                writable: b.writable,
+            })
+            .collect();
+        limits.namespaces.insert(name.clone(), Namespace { binds, network: spec.network });
+    }
+    let mut kernel = Kernel::new(limits).unwrap();
+    let hello = |outputs: Vec<Output>, who: ProcessId| -> Vec<HandleInfo> {
+        outputs
+            .into_iter()
+            .find_map(|o| match o {
+                Output::Send { to, msg: FromKernel::Hello { handles, .. } } if to == who => Some(handles),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let specs = entry(&config, "parent")
+        .grants
+        .iter()
+        .map(|g| CapSpec {
+            endpoint: g.endpoint.clone(),
+            actions: g.actions.clone(),
+            resource: g.resource.clone(),
+            ttl_ms: None,
+            delegable: g.delegable,
+            max_calls: None,
+        })
+        .collect();
+    let parent = kernel.boot_process(ProgramName::new("parent").unwrap(), specs, 0).unwrap();
+    let parent_handles = hello(kernel.drain_outputs(), parent);
+    let args = &program(&config, "parent").args;
+    // The VM keeps no list of models: a client names any provider/model id.
+    let models = ["omm/kimi-k3", "deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"];
+    let parsed = nucleus_chat_agent::Options::parse(args.iter().cloned()).unwrap();
+    let options = sessions::Options::from_agent(&parsed).unwrap().expect("the sessions service");
+    let session = ResourcePath::new(["default", "s1"]).unwrap();
+    let scope = sessions::Scope { project: "default".into() };
+    // A create names its model: the VM gives its agents none of their own.
+    for refused in [None, Some("z-ai")] {
+        assert!(
+            sessions::session_spawn(&options, &parent_handles, &session, &scope, (refused, None)).is_err()
+        );
+    }
+    for (m, chosen) in models.iter().enumerate() {
+        let (authority, program, grants, identity) =
+            sessions::session_spawn(&options, &parent_handles, &session, &scope, (Some(chosen), None))
+                .unwrap();
+        assert_eq!(
+            identity.as_ref().map(|i| i.project.as_str()),
+            Some("default"),
+            "an agent runs as its project"
+        );
+        assert!(program.binds.is_empty() && program.network, "an ordinary process of the projects' user");
+        let chat = nucleus_chat_agent::Options::parse(program.args.iter().cloned()).unwrap();
+        assert_eq!(chat.model, *chosen, "the session agent runs the model its create named");
+        assert!(chat.organisation, "a VM is an organisation's, which its agents are told");
+        assert_eq!(
+            chat.workdir.as_deref(),
+            Some("/workspace/nucleus/work/projects/default/repo"),
+            "where it reads attached files"
+        );
+        assert!(chat.image_models.iter().any(|m| m == models[0]), "Kimi K3 is shown images");
+        let request = RequestId(1 + m as u64);
+        kernel.handle_message(
+            parent,
+            ToKernel::SpawnExecutable { request, authority, program, grants, identity },
+            0,
+        );
+        let outputs = kernel.drain_outputs();
+        let agent = outputs
+            .iter()
+            .find_map(|o| match o {
+                Output::Send {
+                    msg: FromKernel::Response { result: Ok(ResponseBody::Spawned { child }), .. },
+                    ..
+                } => Some(*child),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the session agent: {outputs:?}"));
+        let held = hello(outputs, agent);
+        // Its model authority is the parent's, every model: a message names
+        // the one its turn runs on, and the team's quota pays for each.
+        let model_resources: BTreeSet<Vec<String>> = held
+            .iter()
+            .filter(|h| h.endpoint.as_str() == "model")
+            .map(|h| h.resource.segments().to_vec())
+            .collect();
+        assert_eq!(model_resources, BTreeSet::from([Vec::new()]), "{chosen}");
+        assert!(
+            held.iter().filter(|h| h.endpoint.as_str() == "model").all(|h| h.max_calls.is_none()),
+            "a session's agent has no cap on its model calls"
+        );
+        // Its files, shell and documents are its session's working directory,
+        // and what it may ask to remove is there too.
+        for (endpoint, resource) in [
+            ("fs", &["projects", "default", "repo"][..]),
+            ("shell", &["projects", "default", "repo"]),
+            ("pdf", &["projects", "default", "repo"]),
+            ("approvals", &["fs", "projects", "default", "repo"]),
+        ] {
+            let on: Vec<_> = held.iter().filter(|h| h.endpoint.as_str() == endpoint).collect();
+            assert!(
+                !on.is_empty() && on.iter().all(|h| h.resource.segments() == resource),
+                "{endpoint}: {on:?}"
+            );
+        }
+        // It sets and withdraws its own reminders on its own session, and is
+        // never given `wake`.
+        let conversation: Vec<&HandleInfo> =
+            held.iter().filter(|h| h.endpoint.as_str() == "conversation").collect();
+        assert!(conversation.iter().all(|h| h.resource == session), "{conversation:?}");
+        let actions: BTreeSet<&str> =
+            conversation.iter().flat_map(|h| h.actions.iter().map(|a| a.as_str())).collect();
+        for action in [conv::ACTION_REMIND, conv::ACTION_REMINDERS, conv::ACTION_CANCEL_REMINDER] {
+            assert!(actions.contains(action), "{chosen}: {action}: {actions:?}");
+        }
+        assert!(!actions.contains(conv::ACTION_WAKE), "{chosen}: {actions:?}");
+        // It reads its own session's log, which it continues from at every
+        // start, and hands none of its conversation on.
+        let reads: Vec<&&HandleInfo> = conversation
+            .iter()
+            .filter(|h| h.actions.iter().any(|a| a.as_str() == conv::ACTION_HISTORY))
+            .collect();
+        assert!(reads.len() == 1, "{chosen}: {conversation:?}");
+        assert!(conversation.iter().all(|h| !h.delegable), "{chosen}: {conversation:?}");
+    }
+}
+
+/// Under the real kernel's attenuation rules, the VM's swarm service starts a
+/// member with the grants it builds from its own, as the project's user, and
+/// the kernel holds that member's calls to its slot: it cannot judge, stop or
+/// start a swarm, act on another member's slot, name a file or a shell
+/// workspace beside its own directory, or speak in a conversation. What a
+/// command it runs there reaches is its Linux user's permissions, which this
+/// does not test.
+#[test]
+fn the_vm_swarm_service_starts_members_whose_calls_are_held_to_their_own_slot() {
+    use nucleus_chat_agent::swarm::members;
+    use nucleus_kernel::{CapSpec, Config, Kernel, Namespace, NamespaceBind, Output};
+    use nucleus_protocol::{
+        ActionName, ErrorCode, FromKernel, HandleId, IdentityRequest, Payload, ProcessId, RequestId,
+        ResourcePath, ResponseBody, ToKernel,
+    };
+
+    let config = load("deploy/vm/nucleus.json");
+    let mut limits = Config::with_programs(config.programs.keys().cloned().collect());
+    limits.projects = config.identities.is_some();
+    for (name, spec) in &config.programs {
+        let binds = spec
+            .binds
+            .iter()
+            .map(|b| NamespaceBind {
+                path: b.guest.to_string_lossy().into_owned(),
+                source: b.host.clone(),
+                writable: b.writable,
+            })
+            .collect();
+        limits.namespaces.insert(name.clone(), Namespace { binds, network: spec.network });
+    }
+    let mut kernel = Kernel::new(limits).unwrap();
+    let specs = entry(&config, "swarm")
+        .grants
+        .iter()
+        .map(|g| CapSpec {
+            endpoint: g.endpoint.clone(),
+            actions: g.actions.clone(),
+            resource: g.resource.clone(),
+            ttl_ms: None,
+            delegable: g.delegable,
+            max_calls: None,
+        })
+        .collect();
+    let service = kernel.boot_process(ProgramName::new("swarm").unwrap(), specs, 0).unwrap();
+    let hello = |outputs: Vec<Output>, who: ProcessId| {
+        outputs
+            .into_iter()
+            .find_map(|o| match o {
+                Output::Send { to, msg: FromKernel::Hello { handles, .. } } if to == who => Some(handles),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let held = hello(kernel.drain_outputs(), service);
+    let find = |endpoint: &str, action: &str| {
+        held.iter()
+            .find(|h| h.endpoint.as_str() == endpoint && h.actions.iter().any(|a| a.as_str() == action))
+            .unwrap_or_else(|| panic!("the swarm service holds {endpoint} {action}"))
+    };
+    let path = |segments: &[&str]| ResourcePath::new(segments.iter().copied()).unwrap();
+    let slot = members::Slot {
+        project: "default".into(),
+        session: "s1".into(),
+        swarm: "sabc".into(),
+        member: "m2".into(),
+        root: path(&["projects", "default", "repo"]),
+    };
+    // The service's default model, narrowed from its grant on every model.
+    let model_id = values_of(&program(&config, "swarm").args, "--model")[0].to_owned();
+    let model = (find("model", "complete").handle, ResourcePath::new(model_id.split('/')).unwrap());
+    let grants =
+        members::grants(&members::Held::find(&held).unwrap(), &slot, (model.0, &model.1), 100, 600_000)
+            .unwrap();
+    let web = held.iter().find(|h| h.endpoint.as_str() == "web").map(|h| h.resource.clone());
+    let args = values_of(&program(&config, "swarm").args, "--member-arg")
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let run = members::Run {
+        executable: "/opt/nucleus/bin/nucleus-chat-agent",
+        args: &args,
+        model: &model_id,
+        effort: nucleus_swarm_interface::DEFAULT_REASONING_EFFORT.effort(),
+        steps: 100,
+        task: "t",
+        holding: false,
+        resuming: false,
+        as_project: true,
+    };
+    let program = members::program(&run, &slot, &members::bindings(&slot, web.as_ref()).unwrap()).unwrap();
+    // As its project's user a member is an ordinary process: it has the VM's
+    // network, though the service that starts it has none in its sandbox.
+    assert!(program.network && program.binds.is_empty(), "{program:?}");
+    nucleus_chat_agent::Options::parse(program.args.iter().cloned()).unwrap();
+    let identity =
+        Some(IdentityRequest { authority: find("kernel", "spawn_as").handle, project: "default".into() });
+    let authority = find("kernel", "spawn_executable").handle;
+    kernel.handle_message(
+        service,
+        ToKernel::SpawnExecutable { request: RequestId(1), authority, program, grants, identity },
+        0,
+    );
+    let outputs = kernel.drain_outputs();
+    let member = outputs
+        .iter()
+        .find_map(|o| match o {
+            Output::Send {
+                msg: FromKernel::Response { result: Ok(ResponseBody::Spawned { child }), .. },
+                ..
+            } => Some(*child),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the member: {outputs:?}"));
+    let own = hello(outputs, member);
+    assert!(own.iter().all(|h| !h.delegable), "a member hands nothing on: {own:?}");
+    assert!(own.iter().all(|h| h.endpoint.as_str() != "conversation"), "a member speaks in no conversation");
+    let handle = |endpoint: &str, action: &str| -> HandleId {
+        own.iter()
+            .find(|h| h.endpoint.as_str() == endpoint && h.actions.iter().any(|a| a.as_str() == action))
+            .unwrap_or_else(|| panic!("the member holds {endpoint} {action}: {own:?}"))
+            .handle
+    };
+    let mut request = 10;
+    let mut call = |handle: HandleId, action: &str, resource: &[&str]| -> Option<ErrorCode> {
+        request += 1;
+        let request = RequestId(request);
+        let call = ToKernel::Call {
+            request,
+            handle,
+            action: ActionName::new(action).unwrap(),
+            resource: path(resource),
+            payload: Payload::encode(&serde_json::json!({})).unwrap(),
+            deadline_ms: Some(1_000),
+        };
+        kernel.handle_message(member, call, 0);
+        kernel.drain_outputs().into_iter().find_map(|o| match o {
+            Output::Send { to, msg: FromKernel::Response { request: r, result } }
+                if to == member && r == request =>
+            {
+                result.err().map(|e| e.code)
+            }
+            _ => None,
+        })
+    };
+    let denied = Some(ErrorCode::PermissionDenied);
+    let (slots, writes) = (handle("swarm", "register"), handle("fs", "create"));
+    let swarm_dir = ["projects", "default", "repo", ".ultramath", "sabc"];
+    for (handle, action, resource) in [
+        (slots, "verdict", &["default", "s1"][..]),
+        (slots, "stop", &["default", "s1"]),
+        (slots, "start", &["default", "s1"]),
+        (slots, "status", &["default", "s1"]),
+        (slots, "register", &["default", "s1", "sabc", "m1"]),
+        (slots, "submit", &["default", "s1", "sabc", "m1"]),
+        (writes, "create", &[&swarm_dir[..], &["m1", "x"]].concat()),
+        (writes, "create", &["projects", "default", "repo", "README.md"]),
+        (handle("shell", "exec"), "exec", &["projects", "default", "repo"]),
+        (handle("shell", "exec"), "exec", &[&swarm_dir[..], &["m1"]].concat()),
+    ] {
+        assert_eq!(call(handle, action, resource), denied, "{action} {resource:?}");
+    }
+    // What it is for passes the kernel; nobody provides here, so it goes no further.
+    for (handle, action, resource) in [
+        (slots, "register", &["default", "s1", "sabc", "m2"][..]),
+        (writes, "create", &[&swarm_dir[..], &["m2", "x"]].concat()),
+        (handle("fs", "read"), "read", &[&swarm_dir[..], &["m1", "x"]].concat()),
+    ] {
+        assert_ne!(call(handle, action, resource), denied, "{action} {resource:?}");
+    }
+}

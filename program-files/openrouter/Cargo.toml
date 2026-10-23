@@ -1,0 +1,24 @@
+[package]
+name = "nucleus-openrouter"
+version = "0.0.0"
+description = "Provider of the Nucleus `model` interface backed by the OpenRouter chat completions API."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-model-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# One HTTP stack for every provider call: HTTP/1 only, rustls with the
+# compiled-in web roots, no redirects and no connection pool (transport.rs).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

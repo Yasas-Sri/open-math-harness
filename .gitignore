@@ -1,0 +1,10 @@
+/target
+/examples/slice/out/**/transcript.jsonl
+/examples/slice/log/access.jsonl
+/examples/slice/data/work/report.txt
+
+# agent worktrees are working state, never content
+.claude/worktrees/
+
+__pycache__/
+.playwright-mcp/

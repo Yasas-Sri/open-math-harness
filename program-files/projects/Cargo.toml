@@ -1,0 +1,33 @@
+[package]
+name = "nucleus-projects"
+version = "0.0.0"
+description = "The projects service: routes calls about the person's projects to each project's host processes, which run as the projects' user."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cap-std = "4"
+# A background job's end wakes its session.
+nucleus-conversation-interface.workspace = true
+nucleus-diffs-interface.workspace = true
+# The fs, pdf, shell and skills interfaces this service declares at its own endpoints
+# are those of the programs it starts as hosts; the shell's description comes
+# from the same options its hosts get. Nothing of them runs here.
+nucleus-fs = { path = "../fs" }
+nucleus-pdf-interface.workspace = true
+nucleus-projects-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-shell.workspace = true
+nucleus-shell-interface.workspace = true
+nucleus-skills-interface.workspace = true
+rustix = { version = "1", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

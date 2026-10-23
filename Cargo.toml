@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = ["protocol", "kernel", "platform", "sdk", "program-files/fs", "program-files/fixture", "tests", "cli", "interfaces/model", "program-files/openrouter", "interfaces/conversation", "program-files/conversation", "program-files/chat-agent", "interfaces/sessions", "program-files/ui", "interfaces/approvals", "program-files/approvals", "interfaces/web", "program-files/web", "interfaces/pdf", "program-files/pdf", "interfaces/lean", "program-files/lean", "program-files/prover", "program-files/discovery", "interfaces/explore", "interfaces/discovery", "program-files/discovery-client", "interfaces/shell", "program-files/shell", "platform/preexec", "platform/as", "prompts", "memories/read", "memories/write", "interfaces/memory", "program-files/memory", "program-files/mcp", "program-files/plugin-development", "interfaces/suggestions", "program-files/suggestions", "interfaces/diffs", "program-files/diffs", "interfaces/projects", "program-files/project", "program-files/projects", "interfaces/swarm", "interfaces/publish", "program-files/publish", "interfaces/skills", "program-files/skills"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace.dependencies]
+nucleus-approvals-interface = { path = "interfaces/approvals" }
+nucleus-conversation-interface = { path = "interfaces/conversation" }
+nucleus-kernel = { path = "kernel" }
+nucleus-model-interface = { path = "interfaces/model" }
+nucleus-platform = { path = "platform" }
+nucleus-protocol = { path = "protocol" }
+nucleus-prompts = { path = "prompts" }
+nucleus-memory-interface = { path = "interfaces/memory" }
+nucleus-memories-read = { path = "memories/read" }
+nucleus-memories-write = { path = "memories/write" }
+nucleus-sdk = { path = "sdk" }
+nucleus-sessions-interface = { path = "interfaces/sessions" }
+nucleus-web-interface = { path = "interfaces/web" }
+nucleus-web = { path = "program-files/web" }
+nucleus-pdf-interface = { path = "interfaces/pdf" }
+nucleus-lean-interface = { path = "interfaces/lean" }
+nucleus-explore-interface = { path = "interfaces/explore" }
+nucleus-discovery-interface = { path = "interfaces/discovery" }
+nucleus-shell-interface = { path = "interfaces/shell" }
+nucleus-shell = { path = "program-files/shell" }
+nucleus-suggestions-interface = { path = "interfaces/suggestions" }
+nucleus-diffs-interface = { path = "interfaces/diffs" }
+nucleus-projects-interface = { path = "interfaces/projects" }
+nucleus-swarm-interface = { path = "interfaces/swarm" }
+nucleus-publish-interface = { path = "interfaces/publish" }
+nucleus-skills-interface = { path = "interfaces/skills" }
+nucleus-preexec = { path = "platform/preexec" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+# Unicode general categories, for the check that refuses text a person cannot see (`nucleus_protocol::text`).
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+# The system-prompt template engine, used by the prover to render and by the discovery service to
+# parse. Without `multi_template` a template cannot include, import or extend another; `serde` renders
+# Rust data, `builtins` gives the filters and tests, `debug` gives readable render errors, `fuel` bounds
+# the instructions one render may execute (a task's template is input; a runaway loop must fail, not hang).
+minijinja = { version = "2.24", default-features = false, features = ["builtins", "debug", "fuel", "serde"] }
+
+# The toolchain is pinned in rust-toolchain.toml. Members with `[lints] workspace = true` (all but
+# platform/preexec, which holds the `unsafe` pre-exec hooks and sets its own clippy lints, and
+# prompts) forbid unsafe code and deny unwrap, expect and panic; test code allows them explicitly.
+# Which crate may depend on which is checked from `cargo metadata` by tests/tests/architecture.rs.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

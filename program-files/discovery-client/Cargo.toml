@@ -1,0 +1,19 @@
+[package]
+name = "nucleus-discovery-client"
+version = "0.0.0"
+description = "Headless operator client of the Nucleus `discovery` service: starts one Dream-RSI run from a task file, polls its status and exits with the run's outcome, through the same interface and authorization path as a chat agent."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-discovery-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,62 @@
+[package]
+name = "nucleus-e2e"
+version = "0.0.0"
+description = "End-to-end tests of the Nucleus slice with real confined child processes."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-conversation-interface.workspace = true
+nucleus-kernel.workspace = true
+nucleus-platform.workspace = true
+nucleus-protocol.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+
+[dev-dependencies]
+# Base64 of images (`chat/attachments.rs`).
+base64 = "0.23"
+# The committed compositions are validated by the launcher's own loader
+# (`compositions.rs`), which starts none of them.
+nucleus-cli = { path = "../cli" }
+# The discovery interface's reply bound is checked against the protocol's
+# frame limit (`discovery_tools.rs`); the interface is not booted.
+nucleus-discovery-interface = { path = "../interfaces/discovery" }
+# Every interface a prompt template may name, so `prompts.rs` can check the
+# templates against the tools that actually exist. None of them is booted:
+# the test calls `interface()` and reads the declarations.
+nucleus-approvals-interface = { path = "../interfaces/approvals" }
+nucleus-explore-interface = { path = "../interfaces/explore" }
+nucleus-lean-interface = { path = "../interfaces/lean" }
+nucleus-model-interface = { path = "../interfaces/model" }
+nucleus-pdf-interface = { path = "../interfaces/pdf" }
+nucleus-skills-interface = { path = "../interfaces/skills" }
+# The publish service's actions, so `compositions.rs` checks who holds them.
+nucleus-publish-interface = { path = "../interfaces/publish" }
+nucleus-sessions-interface = { path = "../interfaces/sessions" }
+nucleus-shell-interface = { path = "../interfaces/shell" }
+nucleus-swarm-interface = { path = "../interfaces/swarm" }
+nucleus-web-interface = { path = "../interfaces/web" }
+nucleus-fs = { path = "../program-files/fs" }
+# The job store, opened read-only by `memory.rs` to see that a citation was
+# counted. The service under test is a real child process; this only reads what
+# it wrote.
+nucleus-memories-write = { path = "../memories/write" }
+# Its hand-written tool names and its prompt assembly, so `prompts.rs` checks
+# templates against the source of truth rather than a copy.
+nucleus-chat-agent = { path = "../program-files/chat-agent" }
+nucleus-prompts = { path = "../prompts" }
+# The identity helper's policy parser, so `compositions.rs` checks the VM's
+# helper policy against its composition and `activate`.
+nucleus-as = { path = "../platform/as" }
+# The projects service's and the UI service's own bounds on what they hold and
+# forward, so `compositions.rs` checks the VM's kernel limits leave them room.
+nucleus-projects = { path = "../program-files/projects" }
+nucleus-ui = { path = "../program-files/ui" }
+# Reads `prompts/templates/manifest.toml`, which says what each template
+# presupposes. A dev dependency: it never ships in a crate.
+toml = "0.9"
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+# Background jobs
+
+A computation that may take more than a few minutes goes to the background: `shell_exec` with `background: true` answers at once with the job's id, and the command keeps running until it ends, with no time limit unless you give one (timeout_ms). Tell the person you started it and go on with the conversation. You are woken with its exit status, its last lines of output and the path of its full output when it ends, so never wait for it in a loop or with sleep. A person may also move a command of yours to the background while it runs: its call then answers that it was moved, and the same holds.
+
+Never detach a process to make it outlive its command (setsid, nohup, disown, a daemon): everything a command starts is killed when it returns. A background job is the way to keep long work running, and it stays visible to `shell_jobs` and stoppable.
+
+Stopping you does not stop a job. At most 16 jobs run in a project at once, its sessions together. `shell_jobs` lists the jobs of the project page by page, the ones other sessions started too, so it tells you what is using the VM; it reads a job's output, and stops a job of this session; stop one you no longer need. Every job's output file is kept under `.nucleus/jobs/` until someone removes it: remove the ones you no longer need. Another session's job, and its processes, are someone else's work: never stop or kill them, even when they use the VM heavily. Tell the person whose they are.

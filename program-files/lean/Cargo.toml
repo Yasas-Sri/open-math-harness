@@ -1,0 +1,17 @@
+[package]
+name = "nucleus-lean"
+version = "0.0.0"
+description = "Provider of the Nucleus `lean` interface: verifies candidate proofs of PutnamBench problems and registered statements under the official protocol, running Lean in a confined workspace with a deadline."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-lean-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

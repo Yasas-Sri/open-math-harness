@@ -1,0 +1,469 @@
+#!/bin/sh
+# Activate this Nucleus bundle in the user's VM. The platform runs it as root,
+# with /bin/sh, from /opt/nucleus/runtimes/<bundle sha256>/ on every
+# runtime_activate, within a time limit; a nonzero exit fails the activation
+# with the end of its stderr (open-math-os compute/src/runtime_manage.rs). Idempotent: a
+# connect that changes nothing only makes sure the services are running; it
+# never restarts them.
+#
+# The order, and what a failure leaves behind:
+#  1. The root filesystem grows into its disk. It has nothing to do with the
+#     rest, and a failure is only reported.
+#  2. The accounts and the workspace: the runtime's user;
+#     the one user every project's process runs as, `projects` (uid and gid
+#     61000), and its home, shared by every project; /workspace and
+#     /var/lib/nucleus taken over; the projects directory; cron and at
+#     refused to `projects`. The owner and mode of this bundle's identity
+#     helper are set; no runtime uses it before step 7.
+#  3. Checks, as the real `projects` user, of this bundle and the image. They
+#     change nothing.
+#  4. /proc shows a user only its own processes: it is remounted, checked as
+#     `projects` and as the runtime's user, and only then made so from boot.
+#     A failure puts /proc back as it was.
+#  5. Directories are added, each with its final mode. The default project
+#     is made once, as `projects`, with the sample the platform put in place
+#     for a new VM. The secrets and the runtime parameters the
+#     platform wrote become the runtime's.
+#  6. What is the runtime's alone under /workspace/nucleus is closed and
+#     checked as `projects`. No project's process uses any of it.
+#  7. The switch: the program links, the configuration, the units, from boot
+#     on. An earlier runtime's link firewall goes.
+#  8. The services are restarted if anything changed, else only started, and
+#     the UI service and the GitHub broker run.
+#  9. Nothing listens on vsock but what systemd holds; otherwise the runtime
+#     is stopped.
+# From step 7 on nothing is undone: a failure leaves the runtime as it is then
+# (stopped, after a failed check), and the next activation goes on from there.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+bundle=$(cd "$(dirname "$0")/../.." && pwd -P)
+deploy=$bundle/deploy/vm
+changed=
+
+fail() {
+    echo "nucleus activate: $*" >&2
+    journalctl -u nucleus -n 30 --no-pager >&2 || true
+    exit 1
+}
+note() {
+    echo "nucleus activate: $*" >&2
+}
+
+# 1. The root filesystem fills its disk. The platform grows a VM's disk when
+# its tier grows, and the image has cloud-init, which would grow it at boot,
+# switched off. The root partition grows into the room after it, then its ext4
+# filesystem, online. Neither ever shrinks, and with no room nothing changes.
+# A failure is reported and stops nothing: the VM keeps the space it had.
+root=$(readlink -f "$(findmnt -nvo SOURCE /)")
+partition=/sys/class/block/${root##*/}/partition
+if [ "$(findmnt -nvo FSTYPE /)" != ext4 ] || [ ! -r "$partition" ]; then
+    note "the root filesystem ($root) is not an ext4 partition; not grown"
+elif ! command -v growpart >/dev/null 2>&1; then
+    note "growpart (cloud-guest-utils) is missing; the root filesystem is not grown"
+else
+    disk=/dev/$(lsblk -no PKNAME "$root" 2>/dev/null || true)
+    if grown=$(growpart "$disk" "$(cat "$partition")" 2>&1); then
+        note "$grown"
+    elif [ "${grown#NOCHANGE:}" = "$grown" ]; then
+        note "growpart $disk: $grown"
+    fi
+    resize2fs "$root" >/dev/null 2>&1 || note "resize2fs $root failed"
+fi
+
+# 2. The runtime's unprivileged service account.
+getent group nucleus >/dev/null || groupadd --system nucleus
+id -u nucleus >/dev/null 2>&1 ||
+    useradd --system --gid nucleus --home-dir /var/lib/nucleus --no-create-home \
+        --shell /usr/sbin/nologin nucleus
+# The one user every project's process runs as, through the identity
+# helper, whose policy names it. Its uid and gid are 61000: clear of
+# the system's and regular users' (login.defs' UID_MAX is 60000), systemd's
+# homed and host-mapped users (to 60577) and its dynamic service users (from
+# 61184). Its own group alone, no password, no login shell, no lastlog record,
+# no subordinate ids (it could map other uids); its home is the projects'
+# shared one, where what one project installs is every project's.
+home=/workspace/nucleus/work/home
+getent group projects >/dev/null || groupadd --gid 61000 projects ||
+    fail "the group projects (gid 61000) cannot be made"
+id -u projects >/dev/null 2>&1 ||
+    useradd --uid 61000 --gid projects --home-dir "$home" --no-create-home --shell /usr/sbin/nologin \
+        --no-log-init --key SUB_UID_COUNT=0 --key SUB_GID_COUNT=0 projects ||
+    fail "the user projects (uid 61000) cannot be made"
+[ "$(getent passwd projects | cut -d: -f3,4,6)" = "61000:61000:$home" ] && [ "$(id -G projects)" = 61000 ] ||
+    fail "the user projects must have uid 61000, its own group 61000 alone and the home $home"
+! grep -qs '^projects:' /etc/subuid /etc/subgid || fail "the user projects must have no subordinate ids"
+# The runtime's state is its alone. The platform writes its secrets before the
+# first activation, which makes the directories above them with default
+# modes; the secrets' own directories are 0700 already.
+install -d -o nucleus -g nucleus -m 0700 /var/lib/nucleus
+# The workspace. A project's processes reach the projects directory and the
+# shared home through /workspace/nucleus and work by path, so others may
+# traverse these two, never list them; what lies inside keeps its own modes.
+# The two are root's, and the runtime's user cannot put a link there for root
+# to follow. One already there (put by anyone else) stops the activation.
+# The projects directory is the runtime's and `projects`'s: the runtime marks
+# a project being created there and renames one being deleted, `projects`
+# makes and removes the projects' folders.
+[ ! -L /workspace ] || fail "/workspace is a link"
+[ -d /workspace ] || install -d -o root -g root -m 0755 /workspace
+# Root takes /workspace over, before anything in it is checked, so nobody else
+# can rename what is in it.
+chown root:root /workspace
+chmod 0755 /workspace
+[ "$(stat -c '%u %F' /workspace)" = "0 directory" ] || fail "/workspace is not a directory of root's"
+[ ! -L /workspace/nucleus ] || fail "/workspace/nucleus is a link"
+install -d -o root -g root -m 0711 /workspace/nucleus
+for kept in work scratch runs; do
+    [ ! -L "/workspace/nucleus/$kept" ] || fail "/workspace/nucleus/$kept is a link"
+done
+install -d -o root -g root -m 0711 /workspace/nucleus/work
+for kept in projects home; do
+    [ ! -L "/workspace/nucleus/work/$kept" ] || fail "/workspace/nucleus/work/$kept is a link"
+done
+projects=/workspace/nucleus/work/projects
+install -d -o nucleus -g projects -m 0770 "$projects"
+install -d -o projects -g projects -m 0700 "$home"
+# `projects` may not hand work to the VM's schedulers: a job cron or at
+# started would run outside every project's cgroup, where neither a project's
+# Stop nor its deletion reaches it. Without an allow file both read these.
+for deny in /etc/cron.deny /etc/at.deny; do
+    grep -qsx projects "$deny" || echo projects >>"$deny"
+done
+# The identity helper is the bundle's one setuid-root program; only the
+# runtime's group may run it. Its policy is root's file.
+# A helper that has both is left alone: changing a file's owner clears its
+# setuid bit, and a running runtime starts projects' processes with it.
+if [ "$(stat -c '%U:%G %a' "$bundle/bin/nucleus-as")" != "root:nucleus 4750" ]; then
+    chown root:nucleus "$bundle/bin/nucleus-as"
+    chmod 4750 "$bundle/bin/nucleus-as"
+fi
+as_projects="setpriv --reuid projects --regid projects --init-groups"
+
+# 3. Every project's processes run as `projects` with that user's permissions
+# and nothing else: what they need must be theirs to use by path, and what
+# is the runtime's must not be theirs to read or change. It is
+# checked as `projects`, here, where a wrong mode is named, rather than found
+# later as a program that does not start, a key that leaked or a verifier
+# that was tampered with.
+command -v setpriv >/dev/null 2>&1 ||
+    fail "setpriv (util-linux) is missing: what a project's process can reach cannot be checked"
+# Which of the given paths `projects` can read, write or enter.
+probe_paths='for kept; do if [ -r "$kept" ] || [ -w "$kept" ] || [ -x "$kept" ]; then printf "%s " "$kept"; fi; done'
+if $as_projects test -x "$bundle/bin/nucleus-as"; then
+    fail "the projects' user can run the identity helper"
+fi
+# Its folders and its home are its own.
+$as_projects test -w "$projects" && $as_projects test -w "$home" ||
+    fail "the projects' user cannot write $projects and $home"
+# The programs a project's process runs, where step 7 links /opt/nucleus/bin to.
+for program in nucleus-project nucleus-fs nucleus-shell \
+    nucleus-pdf nucleus-skills nucleus-diffs nucleus-chat-agent nucleus-mcp; do
+    $as_projects test -x "$bundle/bin/$program" ||
+        fail "the projects' user cannot run $bundle/bin/$program: the bundle must be readable by all"
+done
+# The discovery workers' shell of a run without network runs behind this:
+# `projects` must be able to make the namespaces.
+$as_projects /usr/bin/bwrap --unshare-net --dev-bind / / --tmpfs /run -- /usr/bin/true ||
+    fail "the projects' user cannot make a network namespace with /usr/bin/bwrap"
+# The runtime's state, where a runtime has made it, and the secrets the
+# platform wrote: the team's model key and the link's configuration.
+secrets=/var/lib/nucleus/secrets
+[ ! -e /var/lib/nucleus ] || [ -z "$($as_projects sh -c "$probe_paths" sh /var/lib/nucleus)" ] ||
+    fail "the projects' user reaches /var/lib/nucleus, which is the runtime's alone"
+for secret in "$secrets/model/key" "$secrets/link/platform.json"; do
+    if $as_projects test -r "$secret"; then
+        fail "the projects' user can read $secret"
+    fi
+done
+# What the runtime runs and what the Lean verifier trusts. Only each directory
+# itself is looked at, not everything beneath it.
+for trusted in /etc/nucleus /opt/nucleus "$bundle" "$bundle/bin" "$bundle/share" \
+    /opt/nucleus/problems /opt/nucleus/repl /opt/lean /opt/mathlib /opt/cslib; do
+    if [ -e "$trusted" ] && $as_projects test -w "$trusted"; then
+        fail "the projects' user can write $trusted"
+    fi
+done
+# No root for it, and no scheduler: a crontab or an at job it could make is
+# removed again, and stops the activation. These are not the only ways to root:
+# a project's process with network runs without `no_new_privs`, so the image's
+# setuid programs work for `projects`, and a flaw in one of them, or in the
+# VM's kernel, reaches every project and the runtime's state.
+if command -v sudo >/dev/null 2>&1 && $as_projects sudo -n true >/dev/null 2>&1; then
+    fail "the projects' user can use sudo"
+fi
+if command -v crontab >/dev/null 2>&1 && echo '# nucleus activate' | $as_projects crontab - >/dev/null 2>&1; then
+    crontab -r -u projects >/dev/null 2>&1 || true
+    fail "the projects' user can use cron (/etc/cron.allow?)"
+fi
+if command -v atq >/dev/null 2>&1 && $as_projects atq >/dev/null 2>&1; then
+    fail "the projects' user can use at (/etc/at.allow?)"
+fi
+
+# 4. A user of the VM sees only its own processes in /proc: the runtime's
+# command lines and environments are not the projects'. `hidepid=2` is the
+# mode every kernel knows; newer ones report it as `invisible`. No group is
+# exempted (`gid=`): the runtime ends its programs through their cgroups and
+# reads no other user's entry, and a project's host finds what its own
+# commands left without it. It hides other users' processes, not what the
+# cgroup tree, /proc/stat, /proc/meminfo and the socket table show. And every
+# project's process is the same user, so every project sees every other's
+# command lines: a shell command's text (`bash -c ...`), a swarm member's
+# `--task`, an agent's working directory and model.
+#
+# From boot it comes from /etc/fstab: the kernel's /proc has no mount unit to
+# configure, and systemd-remount-fs applies the fstab options of /proc before
+# any service starts. Here it is remounted as well, so a VM that is running
+# gets it without a reboot; the fstab entry is written once the checks hold.
+hidden() {
+    findmnt -no OPTIONS /proc | tr ',' '\n' | grep -qxE 'hidepid=(2|invisible)'
+}
+remounted=
+if ! hidden; then
+    mount -o remount,nosuid,nodev,noexec,hidepid=2 /proc || fail "/proc cannot be remounted with hidepid=2"
+    remounted=1
+fi
+# A process of the runtime's user, and one of `projects`, which it must still
+# see: the question is then asked of a /proc that answers at all. Each is
+# looked for once it runs as its user.
+setpriv --reuid nucleus --regid nucleus --clear-groups sleep 60 >/dev/null 2>&1 &
+of_runtime=$!
+$as_projects sleep 60 >/dev/null 2>&1 &
+of_own=$!
+i=0
+until [ "$(stat -c %u "/proc/$of_runtime" "/proc/$of_own" 2>/dev/null | tr '\n' ' ')" = \
+    "$(id -u nucleus) $(id -u projects) " ]; do
+    i=$((i + 1))
+    [ "$i" -le 50 ] || break
+    sleep 0.1
+done
+others=$($as_projects sh -c 'for pid; do if [ -e "/proc/$pid" ]; then printf "%s " "/proc/$pid"; fi; done
+    if cat /proc/1/cmdline >/dev/null 2>&1; then printf "%s " /proc/1/cmdline; fi' sh 1 "$of_runtime")
+own=$($as_projects sh -c 'if [ -e "/proc/$1" ]; then echo seen; fi' sh "$of_own")
+kill "$of_runtime" "$of_own" 2>/dev/null || true
+wrong=
+[ -z "$others" ] || wrong="the projects' user sees ${others}in /proc, which are not its own"
+[ -n "$wrong" ] || [ "$own" = seen ] || wrong="the projects' user does not see its own process in /proc"
+# The runtime's own programs run in sandboxes with a /proc of their own, and
+# the workers' shell without network behind the VM's: both must still start.
+[ -n "$wrong" ] || setpriv --reuid nucleus --regid nucleus --clear-groups /usr/bin/bwrap --unshare-all \
+    --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+    --proc /proc --dev /dev -- /usr/bin/true ||
+    wrong="the runtime's user cannot start a sandbox with a /proc of its own"
+[ -n "$wrong" ] || $as_projects /usr/bin/bwrap --unshare-net --dev-bind / / --tmpfs /run -- /usr/bin/true ||
+    wrong="the projects' user cannot make a network namespace with /usr/bin/bwrap"
+if [ -n "$wrong" ]; then
+    [ -z "$remounted" ] || mount -o remount,nosuid,nodev,noexec,hidepid=0 /proc ||
+        note "/proc could not be put back"
+    fail "$wrong, with hidepid=2 on /proc"
+fi
+entry='proc /proc proc nosuid,nodev,noexec,hidepid=2 0 0'
+if ! grep -qxF "$entry" /etc/fstab 2>/dev/null; then
+    {
+        [ ! -e /etc/fstab ] || awk '$1 ~ /^#/ || $2 != "/proc"' /etc/fstab
+        echo "$entry"
+    } >/etc/fstab.new
+    chmod 0644 /etc/fstab.new
+    mv -f /etc/fstab.new /etc/fstab
+    systemctl daemon-reload
+fi
+
+# 5. Directories, each made with its final mode. /var/lib/nucleus/* come
+# from the unit's StateDirectory; the projects directory and the shared home were made in step 2. The scratch
+# directory and the runs' records are the runtime's alone.
+install -d -o nucleus -g nucleus -m 0700 /workspace/nucleus/scratch
+runs=/workspace/nucleus/runs
+install -d -o nucleus -g nucleus -m 0700 "$runs"
+
+# The default project, where a window's sessions go when it names none: made
+# once, as `projects`, as projects.create makes one (its folder, then an empty
+# repository: git init, branch main, no template). Nothing is made as root
+# under the projects directory. A VM keeps it afterwards whatever is done
+# with it.
+made_default=
+if [ ! -e "$projects/default" ] && [ ! -e "$projects/.deleting-default" ]; then
+    if ! HOME="$home" $as_projects sh -c \
+        'mkdir -m 0700 "$1" && git init --quiet --template= --initial-branch=main "$1/repo"' sh "$projects/default"; then
+        $as_projects rm -rf --one-file-system "$projects/default" || true
+        fail "the default project cannot be made"
+    fi
+    made_default=yes
+fi
+# The Sample project: before a new VM's first activation the platform may
+# put an approved archive here, the default project's files (`files/`) and
+# chats (`chats/NAME.jsonl`, a header line, then the session's log). It fills the default
+# project made just now, and only that: the files unpacked as `projects` into its empty
+# repository, each chat written as the runtime's user as session NAME; both read what root
+# opened. The archive goes whether it was used or not.
+sample_dir=/var/lib/agent-vm-sample
+if [ -n "$made_default" ] && [ -f "$sample_dir/sample.tar.gz" ] && [ ! -L "$sample_dir/sample.tar.gz" ]; then
+    $as_projects sh -c 'umask 077 && tar -xzf - -C "$1" --no-same-owner --strip-components=1 files' \
+        sh "$projects/default/repo" <"$sample_dir/sample.tar.gz" ||
+        fail "the sample's files cannot be installed"
+    as_runtime="setpriv --reuid nucleus --regid nucleus --init-groups"
+    sessions=/var/lib/nucleus/sessions
+    install -d -o nucleus -g nucleus -m 0700 "$sessions"
+    chats=$(mktemp -d) || fail "the sample's chats cannot be unpacked"
+    tar -xzf "$sample_dir/sample.tar.gz" -C "$chats" --no-same-owner --no-same-permissions chats ||
+        fail "the sample's chats cannot be unpacked"
+    for chat in "$chats"/chats/*.jsonl; do
+        [ -f "$chat" ] || continue
+        name=$(basename "$chat" .jsonl)
+        printf '%s\n' "$name" | grep -Eqx '[a-z0-9][a-z0-9_.-]{0,63}' ||
+            fail "the sample chat $name is not named as a session is"
+        tail -n +2 "$chat" | $as_runtime sh -c 'umask 077 && mkdir -p "$1/default/$2" && cat >"$1/default/$2/log.jsonl"' \
+            sh "$sessions" "$name" || fail "the sample chat $name cannot be installed"
+    done
+    rm -rf "$chats"
+fi
+rm -rf --one-file-system "$sample_dir"
+
+# The platform writes the link's configuration (link/platform.json), the
+# team's model key (model/key) and the runtime parameters
+# (settings/parameters.json) here over its management channel, as root; they
+# are the runtime's own, each directory 0700 and each file 0600. The link's
+# configuration is bound into the sandboxes of the UI service and the GitHub
+# broker only, the key into the model adapter's; the parameters into none:
+# only `nucleus serve` reads them, and without them every parameter has its
+# default. Every directory and file is opened without following a link, so
+# that nothing the runtime's user put in its place leads root elsewhere.
+# /var/lib/nucleus itself is the runtime's from step 2.
+python3 - <<'OWN' || fail "the secrets in $secrets cannot be made the runtime's"
+import os, pwd, stat, sys
+nucleus = pwd.getpwnam("nucleus")
+here = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+def own(fd, mode):
+    os.fchown(fd, nucleus.pw_uid, nucleus.pw_gid)
+    os.fchmod(fd, mode)
+
+def directory(parent, name):
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    fd = os.open(name, here, dir_fd=parent)
+    own(fd, 0o700)
+    return fd
+
+secrets = directory(os.open("/var/lib/nucleus", here), "secrets")
+for sub, name in (("link", "platform.json"), ("model", "key"), ("settings", "parameters.json")):
+    folder = directory(secrets, sub)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        sys.exit(f"{sub}/{name} is not a file")
+    own(fd, 0o600)
+OWN
+
+# Configuration directories. nucleus.json binds /opt/cslib; an image without
+# CSLib gets an empty directory, so the bind has its source, and there
+# `import Cslib` fails as an unknown module.
+install -d -m 0755 /etc/nucleus /etc/nucleus/policy /opt/nucleus
+install -d -m 0755 /opt/cslib
+
+# 6. Whatever else lies at the top of /workspace/nucleus and of work is the
+# runtime's alone: the scratch directory, the runs' records, and what else
+# was put there. No project's process uses any of it, so each is closed,
+# whatever made it, and `projects` is asked.
+closed() {
+    find /workspace/nucleus /workspace/nucleus/work -mindepth 1 -maxdepth 1 ! -type l \
+        ! -path /workspace/nucleus/work ! -path "$projects" ! -path "$home" "$@"
+}
+closed -exec chmod go-rwx {} +
+open=$(closed -exec $as_projects sh -c "$probe_paths" sh {} +)
+[ -z "$open" ] || fail "the projects' user reaches ${open}which the runtime keeps to itself"
+
+# 7. The switch. The fixed program paths point at this bundle, atomically.
+link() {
+    [ "$(readlink "$2" 2>/dev/null || true)" = "$1" ] && return 0
+    if [ -e "$2" ] && [ ! -L "$2" ]; then
+        # A real directory here is kept aside, never deleted.
+        aside="$2.pre-bundle"
+        [ -e "$aside" ] && aside="$aside.$(date +%s)"
+        mv -T "$2" "$aside"
+        echo "nucleus activate: moved the image's $2 to $aside" >&2
+    fi
+    ln -sfn "$1" "$2.new"
+    mv -T "$2.new" "$2"
+    changed=1
+}
+link "$bundle/bin" /opt/nucleus/bin
+link "$bundle/program-files" /opt/nucleus/program-files
+link "$bundle/share" /opt/nucleus/share
+
+# Product-owned config and units are replaced when they differ; the local
+# approvals policy is only seeded.
+put() {
+    cmp -s "$1" "$2" && return 0
+    install -m 0644 "$1" "$2.new"
+    mv -f "$2.new" "$2"
+    changed=1
+}
+# nucleus.json names every path a project's process sees by its real spelling,
+# since such a process runs in no sandbox: its project's repository at
+# /workspace/nucleus/work/projects/<project>/repo, the shared home
+# /workspace/nucleus/work/home, the toolchain under /opt, the programs under
+# /opt/nucleus. The services that report a project's paths (projects, parent,
+# swarm, conversation, discovery) bind the projects directory at that same
+# path; lean binds the toolchain, and discovery its programs, shared data and
+# runs, at theirs; so a path any of them reports is a real one. The other
+# programs' guest paths (/sessions, /model, /state, ...) stay inside their
+# sandboxes.
+put "$deploy/nucleus.json" /etc/nucleus/nucleus.json
+put "$deploy/nucleus-as.conf" /etc/nucleus/nucleus-as.conf
+[ -e /etc/nucleus/policy/approvals.json ] ||
+    install -m 0644 "$deploy/approvals.json" /etc/nucleus/policy/approvals.json
+put "$deploy/nucleus.service" /etc/systemd/system/nucleus.service
+# An earlier runtime's link firewall goes.
+unit=nucleus-link-firewall.service
+if systemctl is-enabled --quiet "$unit" 2>/dev/null || systemctl is-active --quiet "$unit"; then
+    systemctl disable --now --quiet "$unit" || true
+fi
+if [ -e "/etc/systemd/system/$unit" ]; then
+    rm -f "/etc/systemd/system/$unit"
+    changed=1
+fi
+rm -rf /etc/nucleus/link-firewall /var/lib/nucleus-link-firewall
+# Its rules, which refused only that runtime's link and cgroups, stand in no one's
+# way if they cannot be removed.
+if command -v nft >/dev/null 2>&1 && nft list table inet nucleus_link >/dev/null 2>&1; then
+    nft delete table inet nucleus_link || note "an earlier runtime's link firewall stays loaded until the VM boots again"
+fi
+# Reloading also after a bundle or config change is harmless and keeps this simple.
+[ -z "$changed" ] || systemctl daemon-reload
+systemctl enable --quiet nucleus.service
+
+# 8. Restart only for a new bundle, config or units; otherwise just ensure
+# running. Ready when the UI service and the GitHub broker each run as the
+# runtime's user: both are nucleus-ui, which a sandbox runs as /nucleus/program
+# with the arguments nucleus.json gives each.
+if [ -n "$changed" ]; then
+    systemctl restart nucleus.service
+else
+    systemctl start nucleus.service
+fi
+for name in '--link' 'github'; do
+    i=0
+    until pgrep -u nucleus -f -x "/nucleus/program $name /link/platform\.json" >/dev/null; do
+        i=$((i + 1))
+        [ "$i" -le 60 ] || fail "Nucleus did not start nucleus-ui $name within 60 s"
+        sleep 1
+    done
+done
+
+# 9. vsock knows no network namespace and its ports above 1023 are anyone's,
+# so whoever listens on one receives what the host sends there. Every vsock
+# listener of the VM is systemd's (pid 1), where `ss` can list them.
+# Otherwise the runtime is stopped.
+if listeners=$(ss --vsock --listening --numeric --processes 2>/dev/null); then
+    stray=$(printf '%s\n' "$listeners" | awk 'NR > 1 && $0 !~ /pid=1,/ { print $5 }' | tr '\n' ' ')
+    if [ -n "$stray" ]; then
+        systemctl stop nucleus.service 2>/dev/null || true
+        fail "vsock listeners that are not systemd's: $stray; the runtime is stopped"
+    fi
+else
+    note "ss cannot list vsock sockets; whether something listens on vsock is not checked"
+fi

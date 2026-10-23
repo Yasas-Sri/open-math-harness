@@ -1,0 +1,11 @@
+[package]
+name = "nucleus-prompts"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# No dependencies, deliberately: see the rule for this crate in
+# `tests/tests/architecture.rs`. It is text plus the logic that fills its slots,
+# and anything an agent needs to use it, an agent already has.
+[dependencies]

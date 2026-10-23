@@ -1,0 +1,24 @@
+[package]
+name = "nucleus-memory"
+version = "0.0.0"
+description = "Memory service: extracts what a session was worth remembering, and starts the confined agent that consolidates it."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The two halves of the pipeline. Neither can reach a kernel or a model on its
+# own: this service is what holds the capabilities to run them.
+nucleus-memories-read = { workspace = true }
+nucleus-memories-write = { workspace = true }
+nucleus-memory-interface = { workspace = true }
+nucleus-conversation-interface = { workspace = true }
+nucleus-model-interface = { workspace = true }
+# The names of the projects whose memories are kept apart.
+nucleus-projects-interface = { workspace = true }
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

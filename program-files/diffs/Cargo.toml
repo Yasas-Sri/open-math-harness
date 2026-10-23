@@ -1,0 +1,20 @@
+[package]
+name = "nucleus-diffs"
+version = "0.0.0"
+description = "Provider of the Nucleus `diffs` interface: reads the git diff of a project's repository."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cap-std = "4"
+nucleus-diffs-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+rustix = { version = "1", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

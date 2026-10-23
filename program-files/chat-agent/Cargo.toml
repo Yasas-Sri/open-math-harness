@@ -1,0 +1,51 @@
+[package]
+name = "nucleus-chat-agent"
+version = "0.0.0"
+description = "Conversational agent loop: user messages in, model-driven tool use, replies out."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Every prompt this agent sends: the instructions, the compaction handoff
+# pair (both halves have to say it is a handoff) and the swarm's prompts.
+nucleus-prompts = { workspace = true }
+# The swarm member's role file.
+toml = "0.9"
+nucleus-approvals-interface.workspace = true
+nucleus-conversation-interface.workspace = true
+# What a session is told it remembers, and how a citation is counted. Both are
+# leaves that hold no authority and cannot reach the write pipeline: an agent
+# reads memory, it does not write it.
+nucleus-memories-read.workspace = true
+nucleus-memory-interface.workspace = true
+nucleus-model-interface.workspace = true
+# An attached PDF's text, through the session's own `pdf` tool.
+nucleus-pdf-interface.workspace = true
+# The names of projects, and where a session's working
+# directory is in its project's home.
+nucleus-projects-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-sessions-interface.workspace = true
+# The shell interface: the swarm service prepares its members' directories
+# with it, and background jobs are its.
+nucleus-shell-interface.workspace = true
+nucleus-skills-interface.workspace = true
+nucleus-swarm-interface.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url = "2"
+# Images reach the model as base64; the
+# transcript keeps an image's SHA-256, never its bytes.
+base64 = "0.23"
+sha2 = "0.10"
+# Files in the working directory are opened with `openat2`, no symbolic
+# link followed (module `workdir`).
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

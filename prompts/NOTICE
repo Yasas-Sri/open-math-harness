@@ -1,0 +1,23 @@
+These prompts are adapted from OpenAI Codex, Copyright 2025 OpenAI, licensed
+under the Apache License 2.0:
+
+    https://github.com/openai/codex at commit c45ea25 (2026-09-20)
+    codex-rs/prompts, codex-rs/core/templates, codex-rs/memories
+
+The prompt-assembly structure follows Codex: the per-model instructions template
+with a personality slot, the sandbox_mode x approval_policy permissions matrix,
+the guardian policy, the compaction handoff pair, and the agent role file
+(the swarm member's). Open Math OS modified the
+files: their text is rewritten for this system's tools and services, which
+differ from Codex's, and some of Codex's wording remains. The
+notice and Codex's license text are in ../third-party/NOTICES.txt and
+../LICENSE, and the VM runtime package carries both.
+
+One thing is deliberately NOT copied in substance. In Codex the guardian
+classifier and the permissions prose are how command safety is decided,
+because Codex has no kernel underneath. Here there is no classifier, and the
+guardian policy and the permissions prose are description only: the
+tools an agent may call are derived by the kernel from the capabilities it
+holds, and approval is the `approvals` service with its own boundary. If a
+guardian template and the capability set ever disagree, the capability set is
+what happens.

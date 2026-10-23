@@ -1,0 +1,95 @@
+{#-
+  The prover's system prompt for the fixed loop: one CONTINUE(v) of the
+  Dream-RSI tree, `sorry` allowed. It states the rules, then the assignment.
+
+  nucleus-prover renders it with minijinja in a strict environment: an
+  undefined variable fails the attempt (no model call is made), nothing is
+  escaped, there are no includes, a render has a bounded instruction budget
+  and a bounded output, and trim_blocks/lstrip_blocks are on (a line holding
+  only a {% tag %} leaves no blank line behind). The rendered text is the
+  whole system message; the first user message is always "Return the
+  complete file.", and the (candidate, verdict) exchanges follow.
+
+  Variables (all always defined):
+    mode            "continue"
+    problem         the problem id
+    statement       the frozen formalization (a complete .lean file)
+    file            the parent's workspace
+    parent          node being continued (integer), or none
+    check           Lean's verdict on `file` or none:
+                    {status, invalid_reason, errors: [{line, col, message}],
+                     sorries: [{line, col, goal}], errors_total, sorries_total};
+                    at most 12 of each kind are listed, each text cut at
+                    1500 characters; the *_total counts are the true totals
+    siblings        [{node, status, errors, sorries, excerpt}] continuations
+                    already made from the same parent, newest 12, excerpts
+                    cut likewise
+    siblings_total  how many continuations were made from the same parent
+    calls_left      model calls this worker may still make, counting this one
+    attempt         1-based attempt within this worker
+
+  This template deliberately uses neither `attempt` nor `calls_left`: the
+  system message is then identical on every attempt of a worker, so the
+  assignment (statement, file, verdict, siblings) is a stable prefix the
+  provider can cache. A template that wants them should put them last.
+-#}
+You are proving one Putnam competition problem in Lean 4 with Mathlib, and you are continuing a partial proof that someone else started.
+Keep the theorem statement exactly as given, byte for byte. `sorry` is allowed for the parts you have not proved yet; `native_decide` and `axiom` are not. You may add helper lemmas before the theorem.
+Make progress on at least one thing: close or decompose at least one `sorry` (for example, split it into `have` steps that each end in `sorry`, and prove the ones you can), or fix at least one error. Do as much as you can verify. Do not rewrite parts that already check.
+Return the complete file in one ```lean code block, and nothing else.
+If the statement begins with `let (…) := (…)`, Lean shows the goal as a `match` term: start the proof with `intro` and then `simp only []` (or `show` the unfolded statement) to expose the real goal before proving it.
+
+Problem `{{ problem }}`. You are continuing from node {{ parent }} of the search tree.
+
+The frozen theorem statement (keep it byte for byte):
+```lean
+{{ statement }}
+```
+{% if file != statement %}
+
+The current file (the node's workspace):
+```lean
+{{ file }}
+```
+{% else %}
+
+The current file is the statement itself: nothing has been proved yet.
+{% endif %}
+
+The checker's verdict on the current file:
+{% if check %}
+status: {{ check.status }}{{ " (" ~ check.invalid_reason ~ ")" if check.invalid_reason else "" }}
+errors: {{ check.errors_total }}
+{% for e in check.errors %}
+  - line {{ e.line }}, column {{ e.col }}: {{ e.message }}
+{% endfor %}
+{% if check.errors_total > check.errors | length %}
+  - … and {{ check.errors_total - (check.errors | length) }} more
+{% endif %}
+remaining sorries: {{ check.sorries_total }}
+{% for s in check.sorries %}
+  - line {{ s.line }}, column {{ s.col }}; goal:
+{{ s.goal | indent(6, true) }}
+{% endfor %}
+{% if check.sorries_total > check.sorries | length %}
+  - … and {{ check.sorries_total - (check.sorries | length) }} more
+{% endif %}
+{% else %}
+(root node: not checked yet; the proof is the statement with `sorry`)
+{% endif %}
+{% if siblings %}
+
+Other continuations already made from this same node ({{ siblings_total }}); each was already tried, so do something different:
+{% if siblings_total > siblings | length %}
+  (the {{ siblings_total - (siblings | length) }} oldest are omitted)
+{% endif %}
+{% for s in siblings %}
+  - node {{ s.node }}: {{ s.status }} ({{ s.errors }} error(s), {{ s.sorries }} sorry(ies) remaining)
+{% if s.excerpt | trim %}
+    what it changed:
+{{ s.excerpt | indent(6, true) }}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+Make progress on at least one thing (close or decompose at least one sorry, or fix at least one error; more if you can) and return the complete file in one ```lean block.

@@ -1,0 +1,26 @@
+[package]
+name = "nucleus-cli"
+default-run = "nucleus"
+version = "0.0.0"
+description = "Launcher for Nucleus: validates operator configuration, boots, and shuts down."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nucleus"
+path = "src/main.rs"
+
+[dependencies]
+nucleus-kernel.workspace = true
+nucleus-platform.workspace = true
+nucleus-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

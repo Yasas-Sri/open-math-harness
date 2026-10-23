@@ -1,0 +1,1795 @@
+{
+  "lifetime": "resident",
+  "grace_ms": 3000,
+  "ready_timeout_ms": 300000,
+  "limits": {
+    "max_processes": 1536,
+    "max_handles_per_process": 2048,
+    "max_pending_per_caller": 1280,
+    "max_inflight_per_endpoint": 512,
+    "max_deadline_ms": 3600000
+  },
+  "identities": {
+    "helper": "/opt/nucleus/bin/nucleus-as",
+    "max_active": 96
+  },
+  "parameters": {
+    "swarm_models": {
+      "kind": "model_list",
+      "max_items": 8,
+      "default": [
+        "omm/kimi-k3",
+        "deepseek/deepseek-v4.1-flash",
+        "z-ai/glm-5.3-flash"
+      ]
+    },
+    "discovery_model": {
+      "kind": "model",
+      "default": "deepseek/deepseek-v4.1-flash"
+    },
+    "memory_model": {
+      "kind": "model",
+      "default": "deepseek/deepseek-v4.1-flash"
+    },
+    "suggestions_model": {
+      "kind": "model",
+      "default": "deepseek/deepseek-v4.1-flash"
+    },
+    "image_model": {
+      "kind": "model",
+      "default": "omm/kimi-k3"
+    },
+    "model_base_url": {
+      "kind": "url",
+      "default": "https://api.openmathmodel.org/v1"
+    },
+    "agent_max_output_tokens": {
+      "kind": "integer",
+      "min": 0,
+      "max": 4294967295,
+      "default": 0
+    },
+    "agent_model_deadline_ms": {
+      "kind": "integer",
+      "min": 60000,
+      "max": 3600000,
+      "default": 1800000
+    },
+    "agent_personality": {
+      "kind": "word",
+      "one_of": [
+        "friendly",
+        "none",
+        "pragmatic"
+      ],
+      "default": "pragmatic"
+    },
+    "discovery_max_usd_per_problem": {
+      "kind": "integer",
+      "min": 1,
+      "max": 1000,
+      "default": 20
+    },
+    "discovery_max_attempts": {
+      "kind": "integer",
+      "min": 1,
+      "max": 10000,
+      "default": 400
+    },
+    "discovery_reasoning_effort": {
+      "kind": "word",
+      "one_of": [
+        "high",
+        "low",
+        "max",
+        "medium",
+        "off",
+        "on"
+      ],
+      "default": "max"
+    },
+    "discovery_max_concurrency": {
+      "kind": "integer",
+      "min": 1,
+      "max": 16,
+      "default": 1
+    },
+    "discovery_max_width": {
+      "kind": "integer",
+      "min": 1,
+      "max": 16,
+      "default": 4
+    },
+    "shell_max_timeout_ms": {
+      "kind": "integer",
+      "min": 25000,
+      "max": 3600000,
+      "default": 3600000
+    },
+    "shell_max_vmem_mb": {
+      "kind": "integer",
+      "min": 1024,
+      "max": 1048576,
+      "default": 32768
+    },
+    "shell_max_inflight": {
+      "kind": "integer",
+      "min": 1,
+      "max": 256,
+      "default": 16
+    },
+    "lean_timeout_secs": {
+      "kind": "integer",
+      "min": 10,
+      "max": 3600,
+      "default": 240
+    }
+  },
+  "programs": {
+    "conversation": {
+      "executable": "/opt/nucleus/bin/nucleus-conversation",
+      "args": [
+        "--root",
+        "/sessions",
+        "--projects",
+        "/workspace/nucleus/work/projects"
+      ],
+      "binds": [
+        {
+          "host": "/var/lib/nucleus/sessions",
+          "guest": "/sessions",
+          "writable": true
+        },
+        {
+          "host": "/workspace/nucleus/work/projects",
+          "guest": "/workspace/nucleus/work/projects",
+          "writable": false
+        }
+      ]
+    },
+    "model": {
+      "executable": "/opt/nucleus/bin/nucleus-openrouter",
+      "args": [
+        "--base-url",
+        {
+          "param": "model_base_url"
+        },
+        "--key-file",
+        "/model/key",
+        "--max-timeout-ms",
+        "3600000"
+      ],
+      "binds": [
+        {
+          "host": "/var/lib/nucleus/secrets/model",
+          "guest": "/model",
+          "writable": false
+        }
+      ],
+      "network": true
+    },
+    "memory_files": {
+      "executable": "/opt/nucleus/bin/nucleus-fs",
+      "args": [
+        "--root",
+        "/memories",
+        "--endpoint",
+        "memory_files"
+      ],
+      "binds": [
+        {
+          "host": "/var/lib/nucleus/memories",
+          "guest": "/memories",
+          "writable": true
+        }
+      ]
+    },
+    "memory": {
+      "executable": "/opt/nucleus/bin/nucleus-memory",
+      "args": [
+        "--root",
+        "/memories",
+        "--db",
+        "/state",
+        "--model",
+        {
+          "param": "memory_model"
+        },
+        "--agent-executable",
+        "/programs/nucleus-chat-agent",
+        "--fs-endpoint",
+        "memory_files",
+        "--quiet-ms",
+        "300000",
+        "--projects",
+        "/projects"
+      ],
+      "binds": [
+        {
+          "host": "/var/lib/nucleus/memories",
+          "guest": "/memories",
+          "writable": true
+        },
+        {
+          "host": "/var/lib/nucleus/memory-state",
+          "guest": "/state",
+          "writable": true
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-chat-agent",
+          "guest": "/programs/nucleus-chat-agent",
+          "writable": false
+        },
+        {
+          "host": "/workspace/nucleus/work/projects",
+          "guest": "/projects",
+          "writable": false
+        }
+      ]
+    },
+    "approvals": {
+      "executable": "/opt/nucleus/bin/nucleus-approvals",
+      "args": [
+        "--policy",
+        "/policy/approvals.json",
+        "--log",
+        "/log/approvals.jsonl"
+      ],
+      "binds": [
+        {
+          "host": "/etc/nucleus/policy",
+          "guest": "/policy",
+          "writable": false
+        },
+        {
+          "host": "/var/lib/nucleus/approvals-log",
+          "guest": "/log",
+          "writable": true
+        }
+      ]
+    },
+    "web": {
+      "executable": "/opt/nucleus/bin/nucleus-web",
+      "args": [],
+      "binds": [],
+      "network": true
+    },
+    "projects": {
+      "executable": "/opt/nucleus/bin/nucleus-projects",
+      "args": [
+        "--root",
+        "/workspace/nucleus/work/projects",
+        "--home",
+        "/workspace/nucleus/work/home",
+        "--programs",
+        "/opt/nucleus/bin",
+        "--jobs",
+        "/jobs",
+        "--skills-catalog",
+        "https://skills.openmathmodel.org/index.json",
+        "--identities",
+        "on",
+        "--env",
+        "PATH=/opt/lean/bin:/opt/math/bin:/usr/local/bin:/usr/bin:/bin",
+        "--env",
+        "LEAN_PATH=/opt/mathlib/.lake/packages/Cli/.lake/build/lib/lean:/opt/mathlib/.lake/packages/batteries/.lake/build/lib/lean:/opt/mathlib/.lake/packages/Qq/.lake/build/lib/lean:/opt/mathlib/.lake/packages/aesop/.lake/build/lib/lean:/opt/mathlib/.lake/packages/proofwidgets/.lake/build/lib/lean:/opt/mathlib/.lake/packages/importGraph/.lake/build/lib/lean:/opt/mathlib/.lake/packages/LeanSearchClient/.lake/build/lib/lean:/opt/mathlib/.lake/packages/plausible/.lake/build/lib/lean:/opt/mathlib/.lake/packages/mathlib/.lake/build/lib/lean:/opt/mathlib/.lake/build/lib/lean:/opt/cslib/.lake/build/lib/lean:/opt/lean/lib/lean",
+        "--env",
+        "MPLBACKEND=Agg",
+        "--shell-arg",
+        "--max-timeout-ms",
+        "--shell-arg",
+        {
+          "param": "shell_max_timeout_ms"
+        },
+        "--shell-arg",
+        "--default-timeout-ms",
+        "--shell-arg",
+        "25000",
+        "--shell-arg",
+        "--max-vmem-mb",
+        "--shell-arg",
+        {
+          "param": "shell_max_vmem_mb"
+        },
+        "--shell-arg",
+        "--max-inflight",
+        "--shell-arg",
+        {
+          "param": "shell_max_inflight"
+        },
+        "--shell-arg",
+        "--description",
+        "--shell-arg",
+        "This is the VM itself, not a sandbox: a command is an ordinary process of the one Linux user every project of this VM runs as, and sees the machine as that user does, at real paths (`/proc`, `/sys`, `/tmp`, every installed tool); in `/proc`, so in `ps` and `top`, it sees the processes of every project, never the runtime's. Your project is a folder in /workspace/nucleus/work/projects; its repository is `repo` in it, where every session of the project works (`pwd` prints its path). The other projects' folders lie beside yours and are as open to your commands as your own: read or change one only when the task is there. HOME is /workspace/nucleus/work/home, shared by every project: what is installed there (`pip install --user`, `cargo install`, `elan`, `npm install -g`) is every project's, so keep what one project needs for itself in its folder (a venv, its own `lean-toolchain`). /tmp is the VM's own, shared with every project. There is no sudo, no cron and no at.\n\nThe shell Python on PATH may differ from plugin_capabilities.python_executable; build and run a plugin with the same interpreter and dependency directory.\n\nWhat is installed, besides your workspace:\n- The Lean 4 toolchain on PATH (`lean`), with LEAN_PATH pointing at a fully built Mathlib, so `lean <file>` elaborates a file that begins with `import Mathlib`. The import maps about 6.4 GB of Mathlib's files: it takes about 2 to 3 s once they are in memory and about 20 s when they are read from disk, as on the first run after the VM starts (measured with Lean 4.33.1; `nproc` and `free` say what this VM has). Commands stop after 25 s unless you pass `timeout_ms`; pass it (for example 300000) for Lean and other long commands. Use `lean <file>` directly with the configured LEAN_PATH. /opt/mathlib belongs to root and is not yours to write; Lake commands that need to write its build or configuration files will fail.\n- Mathlib's source. Depending on the installed checkout it is under /opt/mathlib/Mathlib or /opt/mathlib/.lake/packages/mathlib/Mathlib; use the existing location.\n- Mathlib reference entry point: /opt/nucleus/docs/README.md. When present, read it first for the file formats and import scope; /opt/nucleus/docs/PROVENANCE.md records the snapshot version and limitations. The reference may be of another Lean and Mathlib version than the toolchain here, which `lean --version` names; across versions some names and types differ.\n- Reference navigation: /opt/nucleus/docs/TOPICS.md groups proof tasks; /opt/nucleus/docs/INDEX.md groups subjects and modules. Read the relevant module overview before its declaration pages. /opt/nucleus/docs/lookup.tsv has exact name, page path relative to /opt/nucleus/docs, and one-based starting line; read the selected entry rather than the whole index.\n- Searchable TSV references: /opt/nucleus/docs/names.tsv (name, kind, module-relative source path) and /opt/nucleus/docs/decls-full.tsv (name, kind, module, displayed type, documentation). Fields are actual tabs, without a header. Prefer detailed entries; names.tsv also includes internal/generated names. Confirm uncertain names and types with the active Lean environment or current source.\n- An older or partial reference may lack the guide, navigation or referenced pages. In that case use the available TSV files and current source, without assuming version alignment or repeatedly opening missing paths. An index miss does not prove nonexistence.\n- python3, with numpy and sympy.\n- The lines below hold for a VM created from the 2026-10 image or a later one; `ls /opt/cslib/Cslib` and `command -v nauty-geng` tell.\n- CSLib, the Lean library for computer science, built at /opt/cslib and on LEAN_PATH: `import Cslib`, or one module such as `import Cslib.Computability.Automata.DA.Basic`.\n- nauty and Traces: `nauty-geng`, `nauty-shortg`, `nauty-labelg`, `dreadnaut`.\n- Graphviz: `dot -Tsvg in.dot -o out.svg`; pydot from Python.\n- Plotly: `fig.write_html(\"fig.html\")` writes a standalone HTML figure; there is no image export.\n- TeX Live: `latexmk -pdf file.tex` (pdfLaTeX, XeLaTeX, LuaLaTeX, BibTeX, Biber), with TikZ and PGFPlots.\n- scikit-fem (`import skfem`), py-pde (`import pde`) and meshio for partial differential equations and mesh files.",
+        "--prover-shell-arg",
+        "--env",
+        "--prover-shell-arg",
+        "PATH=/opt/lean/bin:/opt/math/bin:/usr/local/bin:/usr/bin:/bin",
+        "--prover-shell-arg",
+        "--env",
+        "--prover-shell-arg",
+        "LEAN_PATH=/opt/mathlib/.lake/packages/Cli/.lake/build/lib/lean:/opt/mathlib/.lake/packages/batteries/.lake/build/lib/lean:/opt/mathlib/.lake/packages/Qq/.lake/build/lib/lean:/opt/mathlib/.lake/packages/aesop/.lake/build/lib/lean:/opt/mathlib/.lake/packages/proofwidgets/.lake/build/lib/lean:/opt/mathlib/.lake/packages/importGraph/.lake/build/lib/lean:/opt/mathlib/.lake/packages/LeanSearchClient/.lake/build/lib/lean:/opt/mathlib/.lake/packages/plausible/.lake/build/lib/lean:/opt/mathlib/.lake/packages/mathlib/.lake/build/lib/lean:/opt/mathlib/.lake/build/lib/lean:/opt/cslib/.lake/build/lib/lean:/opt/lean/lib/lean",
+        "--prover-shell-arg",
+        "--env",
+        "--prover-shell-arg",
+        "FUNCNEST=32",
+        "--prover-shell-arg",
+        "--max-timeout-ms",
+        "--prover-shell-arg",
+        "900000",
+        "--prover-shell-arg",
+        "--default-timeout-ms",
+        "--prover-shell-arg",
+        "240000",
+        "--prover-shell-arg",
+        "--max-inflight",
+        "--prover-shell-arg",
+        "2",
+        "--prover-shell-arg",
+        "--description",
+        "--prover-shell-arg",
+        "This is the VM itself, not a sandbox: a command is an ordinary process of the one Linux user every project of this VM runs as, and sees the machine as that user does, at real paths (`/proc`, `/sys`, `/tmp`, every installed tool); in `/proc`, so in `ps` and `top`, it sees the processes of every project, never the runtime's. Your workspace is one directory under the project's folder; the workspaces of the run's other workers lie beside it (`..`). Whether commands have network is stated above: it is what the task of your run chose, or this VM's default where the task did not choose. Where they have none, it is the IP network that is cut: a socket file of this machine outside /run still connects. A command then also finds /run empty, sees other users' files listed as `nobody`'s, and gains nothing from a setuid program. The run's own records (its journal, the workers' transcripts) are the runtime's and closed to this user.\n\nWhat is installed, besides your workspace:\n- The Lean 4 toolchain on PATH (`lean`), with LEAN_PATH pointing at a fully built Mathlib, so `lean <file>` elaborates a file that begins with `import Mathlib`. The import maps about 6.4 GB of Mathlib's files: it takes about 2 to 3 s once they are in memory and about 20 s when they are read from disk, as on the first run after the VM starts (measured with Lean 4.33.1; `nproc` and `free` say what this VM has). Use `lean <file>` directly with the configured LEAN_PATH. /opt/mathlib belongs to root and is not yours to write; Lake commands that need to write its build or configuration files will fail.\n- Mathlib's source. Depending on the installed checkout it is under /opt/mathlib/Mathlib or /opt/mathlib/.lake/packages/mathlib/Mathlib; use the existing location.\n- Mathlib reference entry point: /opt/nucleus/docs/README.md. When present, read it first for the file formats and import scope; /opt/nucleus/docs/PROVENANCE.md records the snapshot version and limitations. The reference may be of another Lean and Mathlib version than the toolchain here, which `lean --version` names; across versions some names and types differ.\n- Reference navigation: /opt/nucleus/docs/TOPICS.md groups proof tasks; /opt/nucleus/docs/INDEX.md groups subjects and modules. Read the relevant module overview before its declaration pages. /opt/nucleus/docs/lookup.tsv has exact name, page path relative to /opt/nucleus/docs, and one-based starting line; read the selected entry rather than the whole index.\n- Searchable TSV references: /opt/nucleus/docs/names.tsv (name, kind, module-relative source path) and /opt/nucleus/docs/decls-full.tsv (name, kind, module, displayed type, documentation). Fields are actual tabs, without a header. Prefer detailed entries; names.tsv also includes internal/generated names. Confirm uncertain names and types with the active Lean environment or current source.\n- An older or partial reference may lack the guide, navigation or referenced pages. In that case use the available TSV files and current source, without assuming version alignment or repeatedly opening missing paths. An index miss does not prove nonexistence.\n- python3, with numpy and sympy.\n- The lines below hold for a VM created from the 2026-10 image or a later one; `ls /opt/cslib/Cslib` and `command -v nauty-geng` tell.\n- CSLib, the Lean library for computer science, built at /opt/cslib and on LEAN_PATH: `import Cslib`, or one module such as `import Cslib.Computability.Automata.DA.Basic`.\n- nauty and Traces: `nauty-geng`, `nauty-shortg`, `nauty-labelg`, `dreadnaut`.\n- Graphviz: `dot -Tsvg in.dot -o out.svg`; pydot from Python.\n- Plotly: `fig.write_html(\"fig.html\")` writes a standalone HTML figure; there is no image export.\n- TeX Live: `latexmk -pdf file.tex` (pdfLaTeX, XeLaTeX, LuaLaTeX, BibTeX, Biber), with TikZ and PGFPlots.\n- scikit-fem (`import skfem`), py-pde (`import pde`) and meshio for partial differential equations and mesh files."
+      ],
+      "binds": [
+        {
+          "host": "/workspace/nucleus/work/projects",
+          "guest": "/workspace/nucleus/work/projects",
+          "writable": true
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-project",
+          "guest": "/opt/nucleus/bin/nucleus-project"
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-fs",
+          "guest": "/opt/nucleus/bin/nucleus-fs"
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-shell",
+          "guest": "/opt/nucleus/bin/nucleus-shell"
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-pdf",
+          "guest": "/opt/nucleus/bin/nucleus-pdf"
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-skills",
+          "guest": "/opt/nucleus/bin/nucleus-skills"
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-diffs",
+          "guest": "/opt/nucleus/bin/nucleus-diffs"
+        },
+        {
+          "host": "/var/lib/nucleus/jobs",
+          "guest": "/jobs",
+          "writable": true
+        }
+      ]
+    },
+    "plugin-development": {
+      "executable": "/opt/nucleus/bin/nucleus-plugin-development",
+      "args": [
+        "--guide",
+        "/program/resources/guide.md"
+      ],
+      "binds": [
+        {
+          "host": "/opt/nucleus/program-files/plugin-development",
+          "guest": "/program",
+          "writable": false
+        }
+      ]
+    },
+    "suggestions": {
+      "executable": "/opt/nucleus/bin/nucleus-suggestions",
+      "args": [
+        "--model",
+        {
+          "param": "suggestions_model"
+        }
+      ],
+      "binds": []
+    },
+    "publish": {
+      "executable": "/opt/nucleus/bin/nucleus-publish",
+      "args": [],
+      "binds": []
+    },
+    "lean": {
+      "executable": "/opt/nucleus/bin/nucleus-lean",
+      "args": [
+        "--workspace",
+        "/opt/mathlib",
+        "--scratch",
+        "/workspace/nucleus/scratch",
+        "--timeout-secs",
+        {
+          "param": "lean_timeout_secs"
+        },
+        "--lean",
+        "/opt/lean/bin/lean",
+        "--lean-path",
+        "/opt/mathlib/.lake/packages/Cli/.lake/build/lib/lean:/opt/mathlib/.lake/packages/batteries/.lake/build/lib/lean:/opt/mathlib/.lake/packages/Qq/.lake/build/lib/lean:/opt/mathlib/.lake/packages/aesop/.lake/build/lib/lean:/opt/mathlib/.lake/packages/proofwidgets/.lake/build/lib/lean:/opt/mathlib/.lake/packages/importGraph/.lake/build/lib/lean:/opt/mathlib/.lake/packages/LeanSearchClient/.lake/build/lib/lean:/opt/mathlib/.lake/packages/plausible/.lake/build/lib/lean:/opt/mathlib/.lake/packages/mathlib/.lake/build/lib/lean:/opt/mathlib/.lake/build/lib/lean:/opt/cslib/.lake/build/lib/lean:/opt/lean/lib/lean",
+        "--problems",
+        "/opt/nucleus/problems",
+        "--repl",
+        "/opt/nucleus/repl",
+        "--repl-max-requests",
+        "8"
+      ],
+      "binds": [
+        {
+          "host": "/opt/mathlib",
+          "guest": "/opt/mathlib"
+        },
+        {
+          "host": "/opt/lean",
+          "guest": "/opt/lean"
+        },
+        {
+          "host": "/opt/cslib",
+          "guest": "/opt/cslib"
+        },
+        {
+          "host": "/workspace/nucleus/scratch",
+          "guest": "/workspace/nucleus/scratch",
+          "writable": true
+        },
+        {
+          "host": "/opt/nucleus/problems",
+          "guest": "/opt/nucleus/problems"
+        },
+        {
+          "host": "/opt/nucleus/repl",
+          "guest": "/opt/nucleus/repl"
+        }
+      ]
+    },
+    "discovery": {
+      "executable": "/opt/nucleus/bin/nucleus-discovery",
+      "args": [
+        "--out",
+        "/workspace/nucleus/runs",
+        "--projects",
+        "/workspace/nucleus/work/projects",
+        "--prover-executable",
+        "/opt/nucleus/bin/nucleus-prover",
+        "--run-executable",
+        "/opt/nucleus/bin/nucleus-discovery",
+        "--tasks-dir",
+        "/opt/nucleus/share",
+        "--policies-dir",
+        "/opt/nucleus/share/policies",
+        "--prover-arg",
+        "--model",
+        "--prover-arg",
+        {
+          "param": "discovery_model"
+        },
+        "--prover-arg",
+        "--max-attempts",
+        "--prover-arg",
+        {
+          "param": "discovery_max_attempts"
+        },
+        "--prover-arg",
+        "--max-output-tokens",
+        "--prover-arg",
+        "0",
+        "--prover-arg",
+        "--model-deadline-ms",
+        "--prover-arg",
+        "3600000",
+        "--prover-arg",
+        "--reasoning-effort",
+        "--prover-arg",
+        {
+          "param": "discovery_reasoning_effort"
+        },
+        "--prover-arg",
+        "--temperature",
+        "--prover-arg",
+        "1",
+        "--prover-arg",
+        "--bash-timeout-ms",
+        "--prover-arg",
+        "240000",
+        "--max-concurrency",
+        {
+          "param": "discovery_max_concurrency"
+        },
+        "--max-width",
+        {
+          "param": "discovery_max_width"
+        },
+        "--max-usd-per-problem",
+        {
+          "param": "discovery_max_usd_per_problem"
+        },
+        "--worker-timeout-ms",
+        "300000",
+        "--shell-endpoint",
+        "prover-shell",
+        "--network-shell-endpoint",
+        "prover-shell-net",
+        "--worker-network",
+        "off"
+      ],
+      "binds": [
+        {
+          "host": "/opt/nucleus/bin",
+          "guest": "/opt/nucleus/bin"
+        },
+        {
+          "host": "/opt/nucleus/share/prompts",
+          "guest": "/opt/nucleus/share/prompts"
+        },
+        {
+          "host": "/opt/nucleus/share/curricula",
+          "guest": "/opt/nucleus/share/curricula"
+        },
+        {
+          "host": "/opt/nucleus/share/policies",
+          "guest": "/opt/nucleus/share/policies"
+        },
+        {
+          "host": "/workspace/nucleus/runs",
+          "guest": "/workspace/nucleus/runs",
+          "writable": true
+        },
+        {
+          "host": "/workspace/nucleus/work/projects",
+          "guest": "/workspace/nucleus/work/projects"
+        }
+      ]
+    },
+    "swarm": {
+      "executable": "/opt/nucleus/bin/nucleus-chat-agent",
+      "args": [
+        "--swarm-service",
+        "--state",
+        "/state",
+        "--member-executable",
+        "/opt/nucleus/bin/nucleus-chat-agent",
+        "--projects",
+        "/workspace/nucleus/work/projects",
+        {
+          "each": "swarm_models",
+          "flag": "--model"
+        },
+        "--member-arg",
+        "--personality",
+        "--member-arg",
+        {
+          "param": "agent_personality"
+        },
+        "--member-arg",
+        "--max-output-tokens",
+        "--member-arg",
+        {
+          "param": "agent_max_output_tokens"
+        },
+        "--member-arg",
+        "--model-deadline-ms",
+        "--member-arg",
+        {
+          "param": "agent_model_deadline_ms"
+        }
+      ],
+      "binds": [
+        {
+          "host": "/opt/nucleus/bin/nucleus-chat-agent",
+          "guest": "/opt/nucleus/bin/nucleus-chat-agent",
+          "writable": false
+        },
+        {
+          "host": "/workspace/nucleus/work/projects",
+          "guest": "/workspace/nucleus/work/projects",
+          "writable": false
+        },
+        {
+          "host": "/var/lib/nucleus/swarm",
+          "guest": "/state",
+          "writable": true
+        }
+      ]
+    },
+    "parent": {
+      "executable": "/opt/nucleus/bin/nucleus-chat-agent",
+      "args": [
+        "--child-executable",
+        "/opt/nucleus/bin/nucleus-chat-agent",
+        "--child-arg",
+        "--personality",
+        "--child-arg",
+        {
+          "param": "agent_personality"
+        },
+        "--child-arg",
+        "--max-output-tokens",
+        "--child-arg",
+        {
+          "param": "agent_max_output_tokens"
+        },
+        "--child-arg",
+        "--model-deadline-ms",
+        "--child-arg",
+        {
+          "param": "agent_model_deadline_ms"
+        },
+        "--child-arg",
+        "--organisation",
+        "--child-arg",
+        "--image-model",
+        "--child-arg",
+        {
+          "param": "image_model"
+        },
+        "--projects",
+        "/workspace/nucleus/work/projects",
+        "--repo-scope",
+        "fs",
+        "--repo-scope",
+        "pdf",
+        "--repo-scope",
+        "skills",
+        "--repo-scope",
+        "shell",
+        "--repo-scope",
+        "approvals",
+        "--project-scope",
+        "github",
+        "--project-scope",
+        "discovery",
+        "--session-scope",
+        "swarm",
+        "--session-scope",
+        "jobs",
+        "--execution-context",
+        "{\"env\":\"compute\",\"workspace\":\"default\",\"workspace_dir\":\"/workspace/nucleus/work/projects/default/repo\",\"programs_dir\":\"/opt/nucleus/bin\",\"network\":true,\"chat_executable\":\"/opt/nucleus/bin/nucleus-chat-agent\",\"mcp_executable\":\"/opt/nucleus/bin/nucleus-mcp\",\"python_executable\":\"/usr/bin/python3\"}",
+        "--tool-bindings",
+        "[{\"service\":\"fs\",\"endpoint\":\"fs\",\"env\":\"compute\",\"workspace\":\"default\",\"resource\":[\"projects\"],\"description\":\"Runs in the remote Linux VM (env=compute), in your session's working directory of its project. Tools with the same environment and workspace share files. Paths are relative to that directory. Different environments do not share files.\"},{\"service\":\"pdf\",\"endpoint\":\"pdf\",\"env\":\"compute\",\"workspace\":\"default\",\"resource\":[\"projects\"],\"description\":\"Runs in the remote Linux VM (env=compute), in your session's working directory of its project. Tools with the same environment and workspace share files. Paths are relative to that directory. Different environments do not share files.\"},{\"service\":\"web\",\"endpoint\":\"web\",\"env\":\"compute\",\"resource\":[],\"description\":\"Runs in the remote Linux VM (env=compute). No shared workspace is declared for this tool. Different environments do not share files.\"},{\"service\":\"plugin-development\",\"endpoint\":\"plugin-development\",\"env\":\"compute\",\"resource\":[],\"description\":\"Runs in the remote Linux VM (env=compute). No shared workspace is declared for this tool. Different environments do not share files.\"},{\"service\":\"shell\",\"endpoint\":\"shell\",\"env\":\"compute\",\"workspace\":\"default\",\"resource\":[\"projects\"],\"description\":\"Runs in the remote Linux VM (env=compute), in your session's working directory of its project. Tools with the same environment and workspace share files. Paths are relative to that directory. Different environments do not share files.\"},{\"service\":\"discovery\",\"endpoint\":\"discovery\",\"env\":\"compute\",\"resource\":[],\"description\":\"Runs in the remote Linux VM (env=compute), on the runs of your session's project. No shared workspace is declared for this tool. Different environments do not share files.\"},{\"service\":\"github\",\"endpoint\":\"github\",\"env\":\"compute\",\"workspace\":\"default\",\"resource\":[\"projects\"],\"description\":\"Uses this project's GitHub connection through the platform. Call status before GitHub work; never ask users for access tokens or SSH keys.\"},{\"service\":\"platform\",\"endpoint\":\"platform\",\"env\":\"compute\",\"resource\":[],\"description\":\"Services the platform offers this team, called through the platform, which sends each request for the team with the service's key. Call without arguments to list them; never ask users for keys.\"}]"
+      ],
+      "binds": [
+        {
+          "host": "/workspace/nucleus/work/projects",
+          "guest": "/workspace/nucleus/work/projects",
+          "writable": false
+        },
+        {
+          "host": "/opt/nucleus/bin/nucleus-chat-agent",
+          "guest": "/opt/nucleus/bin/nucleus-chat-agent",
+          "writable": false
+        }
+      ]
+    },
+    "ui": {
+      "executable": "/opt/nucleus/bin/nucleus-ui",
+      "args": [
+        "--link",
+        "/link/platform.json"
+      ],
+      "binds": [
+        {
+          "host": "/var/lib/nucleus/secrets/link",
+          "guest": "/link",
+          "writable": false
+        }
+      ],
+      "network": true
+    },
+    "github": {
+      "executable": "/opt/nucleus/bin/nucleus-ui",
+      "args": [
+        "github",
+        "/link/platform.json"
+      ],
+      "binds": [
+        {
+          "host": "/var/lib/nucleus/secrets/link",
+          "guest": "/link",
+          "writable": false
+        }
+      ],
+      "network": true
+    }
+  },
+  "boot": [
+    {
+      "program": "conversation",
+      "provides": "conversation",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "conversation"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "model",
+      "provides": "model",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "model"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "projects",
+      "provides": "projects",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "projects"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "files"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "diffs"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "pdf"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "skills"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "prover-shell"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "prover-shell-net"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "shell"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "fs"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "create_endpoint"
+          ],
+          "resource": [
+            "endpoint"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_executable"
+          ],
+          "resource": [
+            "executable",
+            "opt",
+            "nucleus",
+            "bin"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_as"
+          ],
+          "resource": [
+            "identity"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "stop_project"
+          ],
+          "resource": [
+            "identity"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "jobs"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "wake"
+          ],
+          "resource": [],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "memory_files",
+      "provides": "memory_files",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "memory_files"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "memory",
+      "provides": "memory",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "memory"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_executable"
+          ],
+          "resource": [
+            "executable",
+            "programs",
+            "nucleus-chat-agent"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "history"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "model",
+          "actions": [
+            "complete"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "memory_files",
+          "actions": [
+            "read",
+            "list",
+            "create",
+            "append",
+            "remove"
+          ],
+          "resource": [],
+          "delegable": true
+        }
+      ]
+    },
+    {
+      "program": "approvals",
+      "provides": "approvals",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "approvals"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "fs",
+          "actions": [
+            "remove"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "web",
+      "provides": "web",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "web"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "swarm",
+      "provides": "swarm",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "swarm"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_executable"
+          ],
+          "resource": [
+            "executable",
+            "opt",
+            "nucleus",
+            "bin",
+            "nucleus-chat-agent"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_as"
+          ],
+          "resource": [
+            "identity"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "wake",
+            "ultramath_ended"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "model",
+          "actions": [
+            "complete"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "fs",
+          "actions": [
+            "read",
+            "list",
+            "create",
+            "append",
+            "edit"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "shell",
+          "actions": [
+            "exec"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "web",
+          "actions": [
+            "fetch",
+            "curl"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "swarm",
+          "actions": [
+            "board",
+            "register",
+            "abandon",
+            "post",
+            "submit",
+            "progress"
+          ],
+          "resource": [],
+          "delegable": true
+        }
+      ]
+    },
+    {
+      "program": "plugin-development",
+      "provides": "plugin-development",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "plugin-development"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "lean",
+      "provides": "lean",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "lean"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "discovery",
+      "provides": "discovery",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "discovery"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "explore"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "create_endpoint"
+          ],
+          "resource": [
+            "endpoint"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_executable"
+          ],
+          "resource": [
+            "executable",
+            "opt",
+            "nucleus",
+            "bin"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "model",
+          "actions": [
+            "complete",
+            "start",
+            "next",
+            "cancel"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "lean",
+          "actions": [
+            "statement",
+            "check",
+            "verify",
+            "analyze",
+            "complete"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "lean",
+          "actions": [
+            "register"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "lean",
+          "actions": [
+            "forget"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "explore",
+          "actions": [
+            "assignment",
+            "submit",
+            "publish_plan",
+            "read_plans"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "prover-shell",
+          "actions": [
+            "exec"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "prover-shell-net",
+          "actions": [
+            "exec"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        }
+      ]
+    },
+    {
+      "program": "github",
+      "provides": "github",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "github"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "platform"
+          ],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "parent",
+      "provides": "sessions",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "sessions"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_executable"
+          ],
+          "resource": [
+            "executable"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "create_endpoint"
+          ],
+          "resource": [
+            "endpoint"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "spawn_as"
+          ],
+          "resource": [
+            "identity"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "receive",
+            "post",
+            "history",
+            "remind",
+            "reminders",
+            "cancel_reminder"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "clear_reminders"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "model",
+          "actions": [
+            "complete",
+            "start"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "model",
+          "actions": [
+            "next",
+            "cancel"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "fs",
+          "actions": [
+            "read",
+            "create",
+            "append",
+            "edit",
+            "list"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "memory",
+          "actions": [
+            "index",
+            "used",
+            "remember"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "approvals",
+          "actions": [
+            "request"
+          ],
+          "resource": [
+            "fs",
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "web",
+          "actions": [
+            "fetch",
+            "curl"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "pdf",
+          "actions": [
+            "extract"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "skills",
+          "actions": [
+            "list",
+            "load"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "plugin-development",
+          "actions": [
+            "guide"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "shell",
+          "actions": [
+            "exec"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "discovery",
+          "actions": [
+            "start",
+            "status",
+            "list",
+            "problems",
+            "tree",
+            "resume",
+            "stop"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "swarm",
+          "actions": [
+            "start",
+            "status",
+            "verdict",
+            "stop",
+            "records"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "jobs",
+          "actions": [
+            "register",
+            "list",
+            "output",
+            "stop"
+          ],
+          "resource": [],
+          "delegable": true
+        },
+        {
+          "endpoint": "github",
+          "actions": [
+            "status",
+            "fetch",
+            "pull_request",
+            "issue",
+            "fetch_pull_request",
+            "push"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": true
+        },
+        {
+          "endpoint": "platform",
+          "actions": [
+            "request"
+          ],
+          "resource": [],
+          "delegable": true
+        }
+      ]
+    },
+    {
+      "program": "suggestions",
+      "provides": "suggestions",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "suggestions"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "model",
+          "actions": [
+            "complete"
+          ],
+          "resource": [],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "publish",
+      "provides": "publish",
+      "grants": [
+        {
+          "endpoint": "kernel",
+          "actions": [
+            "provide"
+          ],
+          "resource": [
+            "endpoint",
+            "publish"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "history"
+          ],
+          "resource": [],
+          "delegable": false
+        }
+      ]
+    },
+    {
+      "program": "ui",
+      "grants": [
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "say",
+            "history",
+            "wait",
+            "list",
+            "ensure",
+            "queue",
+            "move",
+            "withdraw",
+            "send_now",
+            "changes"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "sessions",
+          "actions": [
+            "create",
+            "stop",
+            "interrupt",
+            "list"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "memory",
+          "actions": [
+            "contents"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "skills",
+          "actions": [
+            "list"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "approvals",
+          "actions": [
+            "list",
+            "decide"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "discovery",
+          "actions": [
+            "status",
+            "list",
+            "problems",
+            "tree",
+            "stop"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "suggestions",
+          "actions": [
+            "next",
+            "title"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "diffs",
+          "actions": [
+            "changes",
+            "file",
+            "repositories"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "projects",
+          "actions": [
+            "list",
+            "create",
+            "stop"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "projects",
+          "actions": [
+            "delete",
+            "purge",
+            "begin_archive",
+            "archive",
+            "unarchive"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "files",
+          "actions": [
+            "list",
+            "download",
+            "upload",
+            "mkdir",
+            "rename",
+            "remove",
+            "git_state",
+            "git_remote",
+            "git_initialize",
+            "bundle_out",
+            "bundle_read",
+            "bundle_write",
+            "bundle_import"
+          ],
+          "resource": [
+            "projects"
+          ],
+          "delegable": false
+        },
+        {
+          "endpoint": "jobs",
+          "actions": [
+            "background"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "publish",
+          "actions": [
+            "findings"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "sessions",
+          "actions": [
+            "forget"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "swarm",
+          "actions": [
+            "forget",
+            "status",
+            "records",
+            "stop"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "discovery",
+          "actions": [
+            "forget",
+            "stop"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "memory",
+          "actions": [
+            "forget",
+            "stop"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "approvals",
+          "actions": [
+            "forget"
+          ],
+          "resource": [],
+          "delegable": false
+        },
+        {
+          "endpoint": "conversation",
+          "actions": [
+            "forget"
+          ],
+          "resource": [],
+          "delegable": false
+        }
+      ]
+    }
+  ]
+}

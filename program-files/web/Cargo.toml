@@ -1,0 +1,17 @@
+[package]
+name = "nucleus-web"
+version = "0.0.0"
+description = "Provider of the Nucleus `web` interface: fetches one web page, or makes one curl-style HTTP request, over a granted network."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-web-interface.workspace = true
+serde.workspace = true
+ureq = "3"
+
+[lints]
+workspace = true

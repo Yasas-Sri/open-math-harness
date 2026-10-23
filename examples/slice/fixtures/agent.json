@@ -1,0 +1,26 @@
+{
+  "turns": [
+    {
+      "note": "Look around inside the granted scope, then try to step outside it.",
+      "tool_calls": [
+        {"tool": "fs.list", "path": ["work"]},
+        {"tool": "fs.read", "path": ["work", "sub", "hello.txt"]},
+        {"tool": "fs.read", "path": ["secret.txt"]}
+      ]
+    },
+    {
+      "note": "Delegate a narrower capability to a worker and wait for it.",
+      "tool_calls": [
+        {"tool": "spawn", "program": "worker", "grants": [{"endpoint": "fs", "actions": ["read"], "path": ["work", "sub"]}]},
+        {"tool": "wait_child"}
+      ]
+    },
+    {
+      "note": "Try to delegate more than is held, then write a report.",
+      "tool_calls": [
+        {"tool": "spawn", "program": "worker", "grants": [{"endpoint": "fs", "actions": ["read"], "path": []}]},
+        {"tool": "fs.create", "path": ["work", "report.txt"], "content": "worker finished; widened delegation was refused\n"}
+      ]
+    }
+  ]
+}

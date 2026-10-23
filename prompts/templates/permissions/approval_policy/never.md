@@ -1,0 +1,1 @@
+`approval_policy` is `never`: there is no one to ask. An action you do not hold a capability for is refused, and no request will reach a person. Do not describe what you would do if approved; do what you can with what you hold, and say plainly which part you could not do.

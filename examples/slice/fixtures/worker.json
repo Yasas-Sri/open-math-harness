@@ -1,0 +1,14 @@
+{
+  "turns": [
+    {
+      "note": "Use the delegated scope, then probe its edges and the sandbox.",
+      "tool_calls": [
+        {"tool": "fs.read", "path": ["work", "sub", "hello.txt"]},
+        {"tool": "fs.read", "path": ["work", "top.txt"]},
+        {"tool": "fs.create", "path": ["work", "sub", "planted.txt"], "content": "should never exist"},
+        {"tool": "fs.read", "path": ["work", "sub", "hello.txt"], "handle": 1},
+        {"tool": "host.read", "path": "/etc/passwd"}
+      ]
+    }
+  ]
+}

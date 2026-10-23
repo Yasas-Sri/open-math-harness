@@ -1,0 +1,17 @@
+[package]
+name = "nucleus-model-interface"
+version = "0.0.0"
+description = "Provider-neutral definition of the Nucleus `model` service interface."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Checks that an image part's base64 is what its media type says.
+base64 = "0.23"
+nucleus-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

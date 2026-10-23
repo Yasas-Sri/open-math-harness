@@ -1,0 +1,21 @@
+[package]
+name = "nucleus-prover"
+version = "0.0.0"
+description = "The prover agent: a discovery worker that continues one node of a problem's tree, checking candidates with the `lean` service and submitting at most one."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+minijinja.workspace = true
+nucleus-explore-interface.workspace = true
+nucleus-lean-interface.workspace = true
+nucleus-model-interface.workspace = true
+nucleus-protocol.workspace = true
+nucleus-sdk.workspace = true
+nucleus-shell-interface.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,1 @@
+A person is about to start a new conversation with an AI assistant that works in their workspace, and has not written yet. Write the one message they are most likely to open with, as they would type it: first person, a single line of at most about 20 words, a concrete and useful first task. Reply with that message only: no quotes, no preface, no explanation.

@@ -16,6 +16,8 @@ fn a_new_session_discovers_github_and_gets_a_tool_answer_without_credentials() {
                 ("g1", "github_status", json!({})),
                 ("g2", "github_pull_request", json!({"reference":"https://github.com/Lab/paper/pull/7"})),
                 ("g3", "github_issue", json!({"reference":8})),
+                ("g4", "github_add_pull_request_labels", json!({"reference":7,"labels":["bug"]})),
+                ("g5", "github_remove_pull_request_label", json!({"reference":7,"label":"bug"})),
             ],
         ),
     ));
@@ -44,7 +46,16 @@ fn a_new_session_discovers_github_and_gets_a_tool_answer_without_credentials() {
                 cap("model", &["complete", "start"], &["deepseek"]),
                 cap(
                     "github",
-                    &["status", "fetch", "push", "pull_request", "issue", "fetch_pull_request"],
+                    &[
+                        "status",
+                        "fetch",
+                        "push",
+                        "pull_request",
+                        "issue",
+                        "fetch_pull_request",
+                        "add_pull_request_labels",
+                        "remove_pull_request_label",
+                    ],
                     &["projects"],
                 ),
             ],
@@ -82,6 +93,8 @@ fn a_new_session_discovers_github_and_gets_a_tool_answer_without_credentials() {
         "github_pull_request",
         "github_issue",
         "github_fetch_pull_request",
+        "github_add_pull_request_labels",
+        "github_remove_pull_request_label",
     ] {
         let tool = tools.iter().find(|t| t["function"]["name"] == name).unwrap();
         assert!(tool["function"]["parameters"]["properties"].get("project").is_none());
@@ -89,7 +102,7 @@ fn a_new_session_discovers_github_and_gets_a_tool_answer_without_credentials() {
     }
     let second: Value = serde_json::from_str(&received[1].body).unwrap();
     assert!(second["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"), "{second}");
-    for id in ["g1", "g2", "g3"] {
+    for id in ["g1", "g2", "g3", "g4", "g5"] {
         assert!(
             second["messages"]
                 .as_array()

@@ -9,7 +9,11 @@
 //! - giving a direction up takes a reason, which stays on the board;
 //! - findings and a submission go under the direction the member holds;
 //! - a direction's first rejection lets its member try once more, the second
-//!   kills it; an accepted submission makes it the swarm's solution.
+//!   kills it; an accepted submission makes it one of the swarm's solutions.
+//!
+//! A board is rebuilt from its swarm's records ([`Board::restore`]) when the
+//! swarm is resumed: every direction, finding, waiting submission and verdict
+//! is in them.
 //!
 //! The bounds: at most [`MAX_DIRECTIONS`] directions and, under each, at most
 //! [`MAX_FINDINGS_PER_DIRECTION`] findings; a registration that would make the
@@ -21,6 +25,7 @@ use std::collections::BTreeMap;
 use nucleus_protocol::{Error, ErrorCode};
 use nucleus_swarm_interface::{
     DirectionState, FindingKind, MAX_DIRECTIONS, MAX_FINDINGS_PER_DIRECTION, PostRequest, SubmitRequest,
+    SwarmRecord,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -113,8 +118,8 @@ pub struct Submission {
 /// What a verdict did to the submitter's direction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Judged {
-    /// Accepted: the direction succeeded and the swarm is solved.
-    Solved { direction: String },
+    /// Accepted: the direction succeeded, one of the swarm's solutions.
+    Accepted { direction: String },
     /// Rejected once: its member continues in the direction with the reason.
     Retry { direction: String },
     /// Rejected twice: the direction is dead; its member must register another.
@@ -284,7 +289,7 @@ impl Board {
         let id = direction.id.clone();
         if accepted {
             direction.state = DirectionState::Succeeded;
-            return Ok(Judged::Solved { direction: id });
+            return Ok(Judged::Accepted { direction: id });
         }
         if direction.rejections() >= 2 {
             direction.state = DirectionState::Dead;
@@ -292,6 +297,67 @@ impl Board {
             return Ok(Judged::Dead { direction: id });
         }
         Ok(Judged::Retry { direction: id })
+    }
+
+    /// How many directions' submissions were accepted.
+    pub fn accepted(&self) -> usize {
+        self.directions.iter().filter(|d| d.state == DirectionState::Succeeded).count()
+    }
+
+    /// The board as `records` leave it, in their order: each direction as its
+    /// last record says, its findings, the submissions still waiting and the
+    /// verdicts given.
+    pub fn restore<'a>(records: impl IntoIterator<Item = &'a SwarmRecord>) -> Self {
+        let mut board = Self::default();
+        for record in records {
+            match record {
+                SwarmRecord::Direction { member, direction, state, text, reason, .. } => {
+                    match board.directions.iter_mut().find(|d| d.id == *direction) {
+                        Some(known) => {
+                            known.state = *state;
+                            known.reason.clone_from(reason);
+                        }
+                        None => board.directions.push(Direction {
+                            id: direction.clone(),
+                            member: member.clone(),
+                            state: *state,
+                            text: text.clone(),
+                            reason: reason.clone(),
+                            findings: Vec::new(),
+                            verdicts: Vec::new(),
+                        }),
+                    }
+                }
+                SwarmRecord::Finding { direction, finding, label, text, paths, .. } => {
+                    if let Some(known) = board.directions.iter_mut().find(|d| d.id == *direction) {
+                        known.findings.push(Finding {
+                            id: finding.clone(),
+                            kind: *label,
+                            text: text.clone(),
+                            paths: paths.clone(),
+                        });
+                    }
+                    board.findings += 1;
+                }
+                SwarmRecord::Submission { member, direction, report, paths, .. } => {
+                    let submission = Submission {
+                        member: member.clone(),
+                        direction: direction.clone(),
+                        report: report.clone(),
+                        paths: paths.clone(),
+                    };
+                    board.pending.insert(member.clone(), submission);
+                }
+                SwarmRecord::Verdict { member, direction, accepted, reason, .. } => {
+                    board.pending.remove(member);
+                    if let Some(known) = board.directions.iter_mut().find(|d| d.id == *direction) {
+                        known.verdicts.push(Verdict { accepted: *accepted, reason: reason.clone() });
+                    }
+                }
+                _ => {}
+            }
+        }
+        board
     }
 
     /// `member`'s run ended without a submission waiting: the direction it
@@ -385,7 +451,7 @@ mod tests {
     }
 
     /// A rejection lets the member try once more in the same direction; the
-    /// second kills it; an accept marks it the solution.
+    /// second kills it; an accept marks it a solution.
     #[test]
     fn the_second_rejection_kills_a_direction_and_an_accept_solves_it() {
         let mut board = Board::default();
@@ -419,7 +485,7 @@ mod tests {
         assert!(board.submit("m2", "d1", &submit("parity proof")).is_err(), "d1 is not m2's");
         board.submit("m2", "d2", &submit("parity proof")).unwrap();
         assert_eq!(board.pending_previews()[0]["report"], "parity proof");
-        assert_eq!(board.judge("m2", true, "checked").unwrap(), Judged::Solved { direction: "d2".into() });
+        assert_eq!(board.judge("m2", true, "checked").unwrap(), Judged::Accepted { direction: "d2".into() });
         assert_eq!(board.direction("d2").unwrap().state, DirectionState::Succeeded);
         assert_eq!(board.member_ended("m3", "never registered"), None);
     }

@@ -131,6 +131,11 @@ pub enum SwarmRecord {
         reserved_calls: u64,
         checks: u64,
     },
+    /// The session's agent resumed the swarm after it was interrupted: it
+    /// runs again until `deadline_at_ms`, with `calls` model calls made
+    /// before. `members` are the ones it was to start again on their
+    /// transcripts; whether each started, the member records that follow say.
+    Resumed { swarm: String, deadline_at_ms: u64, calls: u64, members: Vec<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,8 +148,8 @@ pub enum MemberState {
     /// Its process ended without a solution waiting (its step or time budget,
     /// or its model ended the run).
     Ended,
-    /// The swarm stopped it: a solution was accepted, the swarm was stopped,
-    /// or its time ran out.
+    /// The swarm stopped it: its own solution was accepted, a verdict
+    /// finished the swarm, the swarm was stopped, or its time ran out.
     Stopped,
 }
 
@@ -174,7 +179,7 @@ pub enum FindingKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-    /// A submitted solution was accepted.
+    /// At least one submitted solution was accepted, however the swarm ended.
     Solved,
     Stopped,
     /// Every member ended and nothing waits for a verdict.
@@ -182,7 +187,8 @@ pub enum Outcome {
     /// Its time ran out.
     Deadline,
     /// The swarm service ended first (a restart of the VM's Nucleus); the
-    /// next one records this. Nothing resumes a swarm.
+    /// next one records this. The session's agent may resume it, which a
+    /// [`SwarmRecord::Resumed`] record says.
     Interrupted,
 }
 

@@ -6,12 +6,14 @@
 //! repeats; a member writes no other member's directory and holds none of the
 //! agent's actions; a member's report wakes the session once, through `wake`,
 //! whole; a report over its bound is refused, never cut; the agent's rejection
-//! continues the member on its own transcript with the reason, and its accept
-//! stops the other members; the agent reads the swarm's records and stops it
-//! with its own actions; the swarm's records are its own file, never the
-//! conversation, which a team's window reads through the UI service; a swarm a
-//! restart cut short is recorded interrupted; a deleted project's swarms are
-//! forgotten, records and all.
+//! continues the member on its own transcript with the reason, its accept stops
+//! that member, and with `finish` the others; the agent reads the swarm's
+//! records and stops it with its own actions; the swarm's records are its own
+//! file, never the conversation, which a team's window reads through the UI
+//! service; a swarm a restart cut short is recorded interrupted, and the agent
+//! resumes it from its records, each call a member was killed in answered; a
+//! session runs several swarms, and a call that could mean either is refused;
+//! a deleted project's swarms are forgotten, records and all.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,8 +44,31 @@ fn dir_of(received: &Received, member: &str) -> String {
     format!("{}/{member}", &rest[..end])
 }
 
+/// The swarm the last report a request carries names: "Swarm <id>: member
+/// <m> submitted a solution under direction ...".
+fn reported_swarm(received: &Received) -> String {
+    let end = received.body.rfind(" submitted a solution under direction").expect("a report");
+    let head = &received.body[..end];
+    let start = head.rfind("Swarm ").expect("its swarm") + "Swarm ".len();
+    let id = &head[start..];
+    id[..id.find(':').expect("its swarm's id")].to_owned()
+}
+
 fn call(id: &str, name: &str, arguments: Value) -> Scripted {
     Scripted::json(200, &tool_request(MODEL, &[(id, name, arguments)]))
+}
+
+/// [`call`], with `text` said beside it.
+fn call_saying(id: &str, name: &str, arguments: Value, text: &str) -> Scripted {
+    let mut response = tool_request(MODEL, &[(id, name, arguments)]);
+    response["choices"][0]["message"]["content"] = json!(text);
+    Scripted::json(200, &response)
+}
+
+/// Some 70 KB of a member's notes, beginning with `marker`: two of them make
+/// its transcript longer than one `fs` read returns (128 KiB).
+fn notes(marker: &str) -> String {
+    format!("{marker} {}", "working. ".repeat(7_800))
 }
 
 /// Every record of session s1's swarms, from their files in the swarm
@@ -106,6 +131,16 @@ fn boot(server: &FakeHttp) -> (Scenario, Supervisor, std::path::PathBuf) {
 }
 
 fn boot_options(server: &FakeHttp, extra: &[&str]) -> (Scenario, Supervisor, std::path::PathBuf) {
+    boot_seeded(server, extra, |_, _| {})
+}
+
+/// As [`boot_options`], with `seed` given the scenario and the swarm service's
+/// state before anything starts: what a previous service left.
+fn boot_seeded(
+    server: &FakeHttp,
+    extra: &[&str],
+    seed: impl FnOnce(&Scenario, &std::path::Path),
+) -> (Scenario, Supervisor, std::path::PathBuf) {
     let mut scenario = Scenario::new();
     scenario.write("data/projects/default/repo/README.md", "The problem.");
     scenario.add_fs("fs", "data", "fs");
@@ -127,6 +162,7 @@ fn boot_options(server: &FakeHttp, extra: &[&str]) -> (Scenario, Supervisor, std
     let state = scenario.swarm_state("swarm");
     let left = json!({"v": 1, "swarm": "sold", "project": "default", "session": "s1"});
     std::fs::write(state.join("sold.json"), left.to_string()).unwrap();
+    seed(&scenario, &state);
 
     let supervisor =
         scenario.start_with(scenario.config(|limits| limits.max_inflight_per_endpoint = 16, 64)).unwrap();
@@ -166,7 +202,7 @@ fn boot_options(server: &FakeHttp, extra: &[&str]) -> (Scenario, Supervisor, std
         clear,
         cap("model", &["complete", "start"], &["deepseek"]),
         cap("fs", &["read", "list"], &["projects", "default", "repo"]),
-        cap("swarm", &["start", "status", "verdict", "stop", "records"], &[]),
+        cap("swarm", &["start", "status", "verdict", "stop", "resume", "records"], &[]),
     ];
     supervisor.boot(program("sessions"), sessions_grants).unwrap();
     let target = endpoint("sessions");
@@ -222,7 +258,8 @@ fn a_swarm_claims_directions_judges_a_submission_and_stops_the_others() {
     });
     server.script_with(M1, |received| {
         let paths = [format!("{}/proof.md", dir_of(received, "m1"))];
-        call("c5", "ultramath_post", json!({"kind": "lemma", "text": "f(2) = 4", "paths": paths}))
+        let post = json!({"kind": "lemma", "text": "f(2) = 4", "paths": paths});
+        call_saying("c5", "ultramath_post", post, &notes("NOTES-ONE"))
     });
     // m1 submits only once m2 holds d2, and m2 answers only once m1 holds d1:
     // the order of the registrations, and that m2 runs when m1 is accepted.
@@ -237,7 +274,8 @@ fn a_swarm_claims_directions_judges_a_submission_and_stops_the_others() {
     server.script_with(M1, move |received| {
         wait(&open);
         let paths = [format!("{}/proof.md", dir_of(received, "m1"))];
-        call("c6", "ultramath_submit", json!({"report": "By induction on n: ... Q.E.D.", "paths": paths}))
+        let report = json!({"report": "By induction on n: ... Q.E.D.", "paths": paths});
+        call_saying("c6", "ultramath_submit", report, &notes("NOTES-TWO"))
     });
     let open = Arc::clone(&first);
     server.script_with(M2, move |_| {
@@ -254,10 +292,13 @@ fn a_swarm_claims_directions_judges_a_submission_and_stops_the_others() {
     // submits again.
     server.script_for(JUDGE, call("j0", "ultramath_records", json!({"limit": 2})));
     let reject = json!({"member": "m1", "accept": false, "reason": "Step 3 assumes n odd."});
-    let accept = json!({"member": "m1", "accept": true, "reason": "Checked every step."});
-    for (verdict, said) in [(reject, "m1 tries again."), (accept, "m1 solved it.")] {
+    let accept = json!({"member": "m1", "accept": true, "reason": "Checked every step.", "finish": true});
+    for (mut verdict, said) in [(reject, "m1 tries again."), (accept, "m1 solved it.")] {
         server.script_for(JUDGE, call("j1", "ultramath_status", json!({"direction": "d1"})));
-        server.script_for(JUDGE, call("j2", "ultramath_verdict", verdict));
+        server.script_with(JUDGE, move |received| {
+            verdict["swarm"] = json!(reported_swarm(received));
+            call("j2", "ultramath_verdict", verdict)
+        });
         server.script_for(JUDGE, Scripted::json(200, &completion(MODEL, said)));
     }
     server.script_for(
@@ -316,9 +357,14 @@ fn a_swarm_claims_directions_judges_a_submission_and_stops_the_others() {
     let of = |key: &str| received.iter().filter(|r| r.body.contains(key)).collect::<Vec<_>>();
     // The agent starts, judges and stops swarms; a member holds none of that.
     let agent_tools = offered(of(START)[0]);
-    for tool in
-        ["ultramath_start", "ultramath_status", "ultramath_verdict", "ultramath_stop", "ultramath_records"]
-    {
+    for tool in [
+        "ultramath_start",
+        "ultramath_status",
+        "ultramath_verdict",
+        "ultramath_stop",
+        "ultramath_resume",
+        "ultramath_records",
+    ] {
         assert!(agent_tools.contains(&tool.to_owned()), "{agent_tools:?}");
     }
     for request in of(M1).into_iter().chain(of(M2)) {
@@ -330,6 +376,7 @@ fn a_swarm_claims_directions_judges_a_submission_and_stops_the_others() {
                 "ultramath_verdict",
                 "ultramath_start",
                 "ultramath_stop",
+                "ultramath_resume",
                 "ultramath_status",
                 "ultramath_records"
             ]
@@ -384,6 +431,11 @@ fn a_swarm_claims_directions_judges_a_submission_and_stops_the_others() {
     let retried = of(RETRY);
     assert!(retried[0].body.contains("| Step 3 assumes n odd."), "{}", retried[0].body);
     assert!(retried[0].body.contains("You are member m1 of swarm"), "it continued its own transcript");
+    // The whole of it, though it is longer than one read returns (#526), and nothing it did ran again.
+    let transcript = scenario.host(&format!("data/projects/default/repo/{dir}/transcripts/m1.jsonl"));
+    assert!(std::fs::metadata(transcript).unwrap().len() > 128 * 1024);
+    assert!(retried[0].body.contains("NOTES-ONE") && retried[0].body.contains("NOTES-TWO"));
+    assert_eq!(swarm_records(&log, "finding").len(), 1, "its post was not made again");
     let runs: Vec<Value> = swarm_records(&log, "member")
         .into_iter()
         .filter(|r| r["member"] == "m1" && r["state"] == "running")
@@ -391,7 +443,7 @@ fn a_swarm_claims_directions_judges_a_submission_and_stops_the_others() {
         .collect();
     assert!(runs.len() == 2 && runs[0] != runs[1] && runs.iter().all(Value::is_u64), "{runs:?}");
     assert_eq!(swarm_records(&log, "submission").len(), 2);
-    // Accepting stopped m2 at once and ended the swarm as solved.
+    // Accepting with finish stopped m2 at once and ended the swarm as solved.
     assert!(swarm_records(&log, "member").iter().any(|r| r["member"] == "m2" && r["state"] == "stopped"));
     assert!(
         swarm_records(&log, "direction").iter().any(|r| r["direction"] == "d1" && r["state"] == "succeeded")
@@ -525,6 +577,31 @@ fn model_reasoning_and_mode_are_each_messages_own() {
         let system = body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "system");
         let ultramath =
             system.map(|m| m["content"].as_str().unwrap()).any(|s| s.contains("# Ultramath mode"));
+        let users: Vec<_> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        let notice = "The user has explicitly requested turning off Ultramath";
+        assert_eq!(
+            users.iter().map(|s| s.matches(notice).count()).sum::<usize>(),
+            match n {
+                0..=4 => 0,
+                5..=6 => 1,
+                _ => 2,
+            },
+            "one instruction per switch off, including after restart, call {n}"
+        );
+        assert_eq!(
+            users.last().unwrap().contains(notice),
+            matches!(n, 5 | 7),
+            "only the message switching off carries the instruction, call {n}"
+        );
+        if matches!(n, 5 | 7) {
+            assert!(users.last().unwrap().contains("Stop any active Ultramath run with ultramath_stop"));
+        }
         assert!(body.get("reasoning_mode").is_none(), "harness strategy is not a provider parameter");
         (ultramath, body["reasoning"]["effort"].clone(), body["model"].clone())
     };
@@ -556,9 +633,242 @@ fn model_reasoning_and_mode_are_each_messages_own() {
     let pro = "deepseek/deepseek-v4-pro";
     say(&mut ui, "m7", &json!({"model": pro}), completion(pro, "Seventh."));
     ui.wait_turns("mode", 7);
+    // Replaying the switch-off message preserves its instruction without injecting another.
+    ui.request(json!({"op": "sessions.interrupt", "session": "mode"})).unwrap();
     say(&mut ui, "m8", &json!({"model": "openai/gpt-5"}), completion(MODEL, "Eighth."));
     ui.wait_turns("mode", 8);
     assert_eq!((call(7).2, call(8).2), (json!(pro), json!(MODEL)));
+    drop(ui);
+    assert!(supervisor.shutdown().is_clean());
+}
+
+/// What a previous service left of swarm `sintr` in session `s1`: two members
+/// working, m1 holding d1 with its transcript, which ends in a shell call the
+/// restart killed m1 in, m2's report under d2 waiting for a verdict, seven
+/// model calls made, and its marker. And the start of `sold`, whose marker
+/// every boot leaves: two hours ago, with a deadline that has passed.
+fn seed_interrupted(scenario: &Scenario, state: &std::path::Path) {
+    use nucleus_model_interface::{Message, Role, ToolCall};
+    use nucleus_swarm_interface::{DirectionState, MemberState, SwarmRecord};
+    let now = u64::try_from(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+    )
+    .unwrap();
+    let swarm = || "sintr".to_owned();
+    let member = |name: &str, state| SwarmRecord::Member {
+        swarm: swarm(),
+        member: name.into(),
+        state,
+        note: String::new(),
+        process: None,
+    };
+    let direction = |name: &str, id: &str, text: &str| SwarmRecord::Direction {
+        swarm: swarm(),
+        member: name.into(),
+        direction: id.into(),
+        state: DirectionState::Active,
+        text: text.into(),
+        reason: String::new(),
+    };
+    let records = [
+        SwarmRecord::Started {
+            swarm: swarm(),
+            project: "default".into(),
+            session: "s1".into(),
+            task: "An older claim, interrupted".into(),
+            dir: ".ultramath/sintr".into(),
+            members: vec!["m1".into(), "m2".into()],
+            model: MODEL.into(),
+            reasoning_effort: None,
+            member_steps: 10,
+            budget: 40,
+            deadline_at_ms: now + 3_600_000,
+        },
+        member("m1", MemberState::Running),
+        member("m2", MemberState::Running),
+        direction("m1", "d1", "Induction on the older claim"),
+        direction("m2", "d2", "Parity on the older claim"),
+        SwarmRecord::Submission {
+            swarm: swarm(),
+            member: "m2".into(),
+            direction: "d2".into(),
+            report: "PARITY-REPORT: the older claim holds by parity.".into(),
+            paths: Vec::new(),
+        },
+        member("m2", MemberState::Submitted),
+        SwarmRecord::Usage { swarm: swarm(), calls: 7 },
+    ];
+    let file = state.join("records/default/s1/sintr.jsonl");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let lines: String = records
+        .iter()
+        .enumerate()
+        .map(|(seq, record)| {
+            let mut line = serde_json::to_value(record).unwrap();
+            line["seq"] = json!(seq);
+            line["at_ms"] = json!(now - 60_000 + seq as u64 * 1000);
+            format!("{line}\n")
+        })
+        .collect();
+    std::fs::write(&file, lines).unwrap();
+    let left = json!({"v": 1, "swarm": "sintr", "project": "default", "session": "s1"});
+    std::fs::write(state.join("sintr.json"), left.to_string()).unwrap();
+    let mut over = serde_json::to_value(SwarmRecord::Started {
+        swarm: "sold".into(),
+        project: "default".into(),
+        session: "s1".into(),
+        task: "A claim whose time ran out".into(),
+        dir: ".ultramath/sold".into(),
+        members: vec!["m1".into()],
+        model: MODEL.into(),
+        reasoning_effort: None,
+        member_steps: 10,
+        budget: 40,
+        deadline_at_ms: now - 60_000,
+    })
+    .unwrap();
+    (over["seq"], over["at_ms"]) = (json!(0), json!(now - 7_200_000));
+    std::fs::write(state.join("records/default/s1/sold.jsonl"), format!("{over}\n")).unwrap();
+    let dir = "data/projects/default/repo/.ultramath/sintr";
+    let first = Message::text(Role::User, "RESUMED-M1: you are member m1 of swarm sintr, on direction d1.");
+    // A transcript gets each response before its calls run, and their results after.
+    let build =
+        ToolCall { id: "m1-build".into(), name: "shell_exec".into(), arguments: json!({"command": "make"}) };
+    let killed = Message { tool_calls: vec![build], ..Message::text(Role::Assistant, "") };
+    let transcript = [first, killed]
+        .iter()
+        .map(|m| format!("{}\n", serde_json::to_string(m).unwrap()))
+        .collect::<String>();
+    scenario.write(&format!("{dir}/transcripts/m1.jsonl"), &transcript);
+    scenario.write(&format!("{dir}/m1/notes.md"), "Induction so far.");
+    scenario.write(&format!("{dir}/m2/parity.md"), "Parity proof.");
+}
+
+/// A swarm a restart interrupted is found by `status` and resumed from its
+/// records: its waiting report is judged, its working member goes on from its
+/// transcript, the call the restart killed it in answered as one that did not
+/// return. A second swarm runs beside it in the same session; a verdict that
+/// names no swarm is refused. Accepting a submission stops only its member, so both of the
+/// resumed swarm's are accepted, and it ends solved once nothing runs, which
+/// the last accept's reply says and nothing else.
+#[test]
+fn an_interrupted_swarm_resumes_beside_another_and_accepts_more_than_one() {
+    const MANY: &str = "SWARM-MANY: resume the interrupted swarm, then start a second one";
+    const RESUMED: &str = "RESUMED-M1";
+    const SECOND: &str = "1 members work on the problem below";
+    let server = FakeHttp::start();
+    server.script_for(MANY, call("a0", "ultramath_status", json!({})));
+    server.script_for(MANY, call("p1", "ultramath_resume", json!({"swarm": "sold"})));
+    server.script_for(MANY, call("a1", "ultramath_resume", json!({"swarm": "sintr"})));
+    let accept_m2 =
+        json!({"swarm": "sintr", "member": "m2", "accept": true, "reason": "Checked the parity argument."});
+    server.script_for(MANY, call("a2", "ultramath_verdict", accept_m2));
+    let second = json!({"task": "A newer claim", "members": 1, "member_steps": 10, "minutes": 30});
+    server.script_for(MANY, call("a3", "ultramath_start", second));
+    server.script_for(MANY, call("a4", "ultramath_status", json!({})));
+    let unnamed = json!({"member": "m1", "accept": false, "reason": "Which swarm?"});
+    server.script_for(MANY, call("a5", "ultramath_verdict", unnamed));
+    server.script_for(MANY, Scripted::json(200, &completion(MODEL, "Two swarms run.")));
+    // The resumed member goes on from its transcript and submits under the direction it holds.
+    let report = json!({"report": "INDUCTION-REPORT: the older claim by induction."});
+    server.script_for(RESUMED, call("r1", "ultramath_submit", report));
+    let sleep = json!({"command": "sleep 120", "timeout_ms": 150_000});
+    server.script_for(SECOND, call("n1", "shell_exec", sleep));
+    let accept_m1 =
+        json!({"swarm": "sintr", "member": "m1", "accept": true, "reason": "Checked the induction."});
+    server.script_for(JUDGE, call("j1", "ultramath_verdict", accept_m1));
+    server.script_for(JUDGE, Scripted::json(200, &completion(MODEL, "Both accepted.")));
+
+    let (scenario, mut supervisor, state) = boot_seeded(&server, &[], seed_interrupted);
+    let read = || records(&state);
+    wait_for("the interruption", read, |records| {
+        swarm_records(records, "ended").iter().any(|r| r["swarm"] == "sintr" && r["outcome"] == "interrupted")
+    });
+    let mut ui = scenario.connect_ui_as("ui", Some("Lei"));
+    ui.request(json!({"op": "sessions.create", "session": "s1"})).unwrap();
+    ui.say("s1", "u1", MANY).unwrap();
+    let log = wait_for("the resumed swarm's end", read, |records| {
+        swarm_records(records, "ended").iter().any(|r| r["swarm"] == "sintr" && r["outcome"] == "solved")
+    });
+    let of = |event: &str| -> Vec<Value> {
+        swarm_records(&log, event).into_iter().filter(|r| r["swarm"] == "sintr").collect()
+    };
+    // Its interruption counted the calls it had made; its resumption carried them.
+    assert_eq!(of("ended")[0]["calls"], 7, "{:?}", of("ended"));
+    let resumed = of("resumed");
+    assert_eq!((resumed.len(), &resumed[0]["members"], &resumed[0]["calls"]), (1, &json!(["m1"]), &json!(7)));
+    // Both reports were accepted, each stopping only its member.
+    let verdicts: Vec<(Value, Value)> =
+        of("verdict").iter().map(|r| (r["member"].clone(), r["accepted"].clone())).collect();
+    assert_eq!(verdicts, [(json!("m2"), json!(true)), (json!("m1"), json!(true))]);
+    let accepted: Vec<Value> = of("member")
+        .into_iter()
+        .filter(|r| r["state"] == "stopped" && r["note"] == "its solution was accepted")
+        .map(|r| r["member"].clone())
+        .collect();
+    assert_eq!(accepted, [json!("m2"), json!("m1")]);
+    let ended = of("ended").pop().unwrap();
+    assert!(ended["note"].as_str().unwrap().starts_with("2 accepted"), "{ended}");
+    // The member went on from its transcript, told it was resumed and what it holds.
+    let received = server.received();
+    let resumed_run = received.iter().find(|r| r.body.contains(RESUMED)).unwrap();
+    assert!(resumed_run.body.contains("is resumed"), "{}", resumed_run.body);
+    assert!(resumed_run.body.contains("You still hold direction d1"), "{}", resumed_run.body);
+    // Every call it sends has its result: the one it was killed in says it did not return.
+    let sent: Value = serde_json::from_str(&resumed_run.body).unwrap();
+    let messages = sent["messages"].as_array().unwrap();
+    let answer = |id: &Value| messages.iter().find(|m| m["role"] == "tool" && &m["tool_call_id"] == id);
+    let calls: Vec<&Value> =
+        messages.iter().flat_map(|m| m["tool_calls"].as_array().into_iter().flatten()).collect();
+    assert_eq!(calls.len(), 1, "{messages:#?}");
+    for call in calls {
+        assert!(answer(&call["id"]).is_some(), "{call} has no result: {messages:#?}");
+    }
+    let killed = answer(&json!("m1-build")).unwrap()["content"].as_str().unwrap();
+    assert!(killed.contains("this call did not return"), "{killed}");
+    // The agent's calls: the resumption said what came back; with two swarms
+    // running, the status names both and a verdict naming neither is refused.
+    // The accept that left the resumed swarm nothing running says it ended.
+    let conversation = wait_for(
+        "the last verdict's result",
+        || scenario.conversation_log("s1"),
+        |log| log.iter().any(|r| r["kind"] == "tool_result" && r["call_id"] == "j1"),
+    );
+    let result = |id: &str| -> String {
+        conversation
+            .iter()
+            .find(|r| r["kind"] == "tool_result" && r["call_id"] == id)
+            .map(|r| r["summary"].as_str().unwrap_or_default().to_owned())
+            .unwrap_or_default()
+    };
+    // Before it was resumed, the status found it on disk, interrupted.
+    let before = result("a0");
+    assert!(
+        before.contains("swarm sintr was interrupted") && before.contains("ultramath_resume"),
+        "{before}"
+    );
+    // A swarm whose deadline has passed resumes only for the minutes it is given.
+    let over = result("p1");
+    assert!(over.contains("the time of swarm sold is over") && over.contains("minutes"), "{over}");
+    let resumption = result("a1");
+    assert!(resumption.contains(r#""restarted":["m1"]"#), "{resumption}");
+    assert!(resumption.contains(r#""waiting":["m2"]"#), "{resumption}");
+    let second = swarm_records(&log, "started")
+        .into_iter()
+        .find(|r| !["sintr", "sold"].contains(&r["swarm"].as_str().unwrap_or_default()))
+        .unwrap();
+    let id = second["swarm"].as_str().unwrap();
+    assert!(result("a4").contains(&format!(r#""running":["sintr","{id}"]"#)), "{}", result("a4"));
+    assert!(result("a5").contains("missing field `swarm`"), "{}", result("a5"));
+    let last = result("j1");
+    assert!(last.contains("The swarm has ended (solved)") && !last.contains("goes on"), "{last}");
+    // The window reads each of the session's swarms by its id.
+    let status = ui.request(json!({"op": "swarm.status", "session": "s1", "swarm": "sintr"})).unwrap();
+    assert_eq!((status["swarm"].as_str(), status["state"].as_str()), (Some("sintr"), Some("solved")));
+    assert_eq!(status["accepted"], 2);
+    let status = ui.request(json!({"op": "swarm.status", "session": "s1"})).unwrap();
+    assert_eq!((status["swarm"].as_str(), &status["running"]), (Some(id), &json!([id])), "{status}");
+
     drop(ui);
     assert!(supervisor.shutdown().is_clean());
 }

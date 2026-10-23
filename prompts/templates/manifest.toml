@@ -18,10 +18,11 @@
 # because prompt text is easy to write and easy to forget the assumptions of.
 
 ["model_instructions/default_instructions_template.md"]
-requires = ["shell_exec"]
+requires = ["shell_exec", "fs_list"]
 available = true
 note = """
-Reading before writing, searching, editing. Needs a shell. The chat agent's
+Reading before writing, searching, editing. Needs a shell and filesystem listing
+for checking the user-visible project root. The chat agent's
 system prompt is this template rendered for what the agent holds
 (`nucleus_chat_agent::instructions`), unless an explicit --system-prompt
 replaces it. Swarm members get it too, with their brief appended, so a rule every networked agent must follow (other people's sites:

@@ -10,8 +10,9 @@
 //!
 //! - The messages of one `receive` at the point they were delivered, framed
 //!   as a received message is (`reminders::queued_prompt`): author lines,
-//!   inline attachments, the images a message carries, shown again from the
-//!   log when the model takes images, each attached file named by its path,
+//!   the one-time instruction when that author turns Ultramath off, inline
+//!   attachments, the images a message carries, shown again from the log when
+//!   the model takes images, each attached file named by its path,
 //!   its content not read again (`attachments::replayed`). Those the agent took between
 //!   two steps of a turn are in that turn, after the step's results. A
 //!   message never delivered, waiting still or withdrawn, is not replayed;
@@ -46,8 +47,17 @@
 //! then the history is summarised before the first model call. What is held
 //! while reading is that bound, the page being read, and the messages and
 //! reminders waiting for delivery, which the conversation service bounds.
+//!
+//! A swarm member started again on its transcript (`--resume`) is not rebuilt
+//! from a log: its transcript holds the messages as its model saw them. One
+//! stopped while a call ran (a restart interrupted its swarm) left that call
+//! without a result, and [`transcript`] gives it one the same way. Either way no
+//! model request carries a call without its result, which strict providers
+//! refuse (DeepSeek answers 400). A transcript is held to the same bound as a
+//! log: the oldest exchanges beyond it are left out, with the note, and the
+//! rest is summarised before the first model call.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 
 use nucleus_conversation_interface::{
@@ -79,8 +89,8 @@ pub(crate) struct Restored {
     /// The images the messages carry, by the index of the message in
     /// `messages`, in order.
     pub(crate) images: Vec<(usize, Vec<Held>)>,
-    /// Who has written in the session (`reminders::queued_prompt`).
-    pub(crate) authors: BTreeSet<Option<String>>,
+    /// Who has written and their last delivered mode (`reminders::queued_prompt`).
+    pub(crate) authors: BTreeMap<Option<String>, nucleus_model_interface::ReasoningMode>,
     /// How full the context is taken to be until the first model call
     /// counts it: the estimate, or the threshold when messages were left
     /// out, so the history is summarised before that call.
@@ -127,6 +137,9 @@ enum End {
     /// Nothing ended it: the agent working on it stopped (it crashed, or the
     /// machine did) after its last record, at this time.
     Abandoned(u64),
+    /// A transcript ends inside it: the agent stopped while its calls ran, at
+    /// a time the transcript does not keep ([`transcript`]).
+    Transcript,
 }
 
 /// The deliveries of one `receive`: one dispatch, one time, one receiver.
@@ -186,7 +199,7 @@ pub(crate) struct Rebuild {
     reminders: Vec<Reminder>,
     batch: Option<Batch>,
     turn: Option<Turn>,
-    authors: BTreeSet<Option<String>>,
+    authors: BTreeMap<Option<String>, nucleus_model_interface::ReasoningMode>,
 }
 
 fn size(message: &Message) -> usize {
@@ -210,7 +223,7 @@ impl Rebuild {
             reminders: Vec::new(),
             batch: None,
             turn: None,
-            authors: BTreeSet::new(),
+            authors: BTreeMap::new(),
         }
     }
 
@@ -463,10 +476,7 @@ impl Rebuild {
         }
         let calls: Vec<ToolCall> = step.calls.iter().map(|(call, _)| call.clone()).collect();
         let mut group = vec![Message { tool_calls: calls, ..Message::text(Role::Assistant, step.text) }];
-        for (call, result) in step.calls {
-            let content = result.unwrap_or_else(|| missing_result(end));
-            group.push(Message { tool_call_id: Some(call.id), ..Message::text(Role::Tool, content) });
-        }
+        group.extend(step.calls.into_iter().map(|(call, result)| answer(call, result, end)));
         group.extend(crate::reply_images::note(&step.refused).map(|note| Message::text(Role::User, note)));
         self.keep(group);
     }
@@ -478,7 +488,7 @@ impl Rebuild {
         self.flush(end);
         self.turn = None;
         let note = match end {
-            End::Complete => return,
+            End::Complete | End::Transcript => return,
             End::Stopped(at) => format!(
                 "[The turn above was stopped at {}, before it finished: what it did is above. A call that \
                  had not returned has a result saying so; whether it took effect is unknown.]",
@@ -556,10 +566,56 @@ fn kept_result(record: &Value) -> String {
     }
 }
 
+/// The message answering `call`: its `result`, or, when it has none, one
+/// saying so because of how its turn ended (`end`).
+fn answer(call: ToolCall, result: Option<String>, end: End) -> Message {
+    let content = result.unwrap_or_else(|| missing_result(end));
+    Message { tool_call_id: Some(call.id), ..Message::text(Role::Tool, content) }
+}
+
+/// What a start continuing a transcript (`--resume`) begins with: its
+/// messages, each with its images, every call that has no result answered by
+/// one saying it did not return ([`End::Transcript`]) after the results its
+/// response has, and the history bounded as a rebuilt log's is ([`Rebuild`]):
+/// a message and the results after it are kept or left out together. Nothing
+/// is run again.
+pub(crate) fn transcript(
+    lines: Vec<(Message, Vec<Held>)>,
+    compact_at_tokens: u64,
+    image_input: bool,
+) -> Restored {
+    let mut rebuild = Rebuild::new(compact_at_tokens, image_input);
+    let (mut group, mut images) = (Vec::new(), Vec::new());
+    // The calls of the last response that no result has answered yet.
+    let mut open: Vec<ToolCall> = Vec::new();
+    for (message, held) in lines {
+        if message.role == Role::Tool {
+            open.retain(|call| message.tool_call_id.as_ref() != Some(&call.id));
+            group.push(message);
+            continue;
+        }
+        group.extend(open.drain(..).map(|call| answer(call, None, End::Transcript)));
+        if !group.is_empty() {
+            rebuild.keep_with(std::mem::take(&mut group), std::mem::take(&mut images));
+        }
+        if message.role == Role::Assistant {
+            open.clone_from(&message.tool_calls);
+        }
+        group.push(message);
+        images = held;
+    }
+    group.extend(open.into_iter().map(|call| answer(call, None, End::Transcript)));
+    if !group.is_empty() {
+        rebuild.keep_with(group, images);
+    }
+    rebuild.finish()
+}
+
 /// The result of a call that has none in the log.
 fn missing_result(end: End) -> String {
     let why = match end {
         End::Complete => "no result of this call was recorded".to_owned(),
+        End::Transcript => "this call did not return: the agent stopped while it ran".to_owned(),
         End::Stopped(at) => {
             format!("this call did not return: the turn was stopped at {} while it ran", utc(at))
         }

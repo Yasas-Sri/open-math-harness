@@ -17,7 +17,7 @@
 //!   whose own loop refuses every tool but the board and registration until
 //!   it holds a direction ([`member`]);
 //! - the **session's agent**, which holds `swarm` `start`, `status`,
-//!   `verdict`, `stop` and `records` on its own session as ordinary
+//!   `verdict`, `stop`, `resume` and `records` on its own session as ordinary
 //!   kernel-listed tools, and is told how to use them ([`coordinates`]).
 
 pub(crate) mod board;
@@ -31,9 +31,12 @@ use nucleus_protocol::ToolInfo;
 // Model-facing names change independently of the capability endpoint and wire format.
 fn tool_action(name: &str, prefix: &str) -> Option<&'static str> {
     let action = name.strip_prefix(prefix)?;
-    ["start", "status", "verdict", "stop", "records", "board", "register", "abandon", "post", "submit"]
-        .into_iter()
-        .find(|known| *known == action)
+    [
+        "start", "status", "verdict", "stop", "resume", "records", "board", "register", "abandon", "post",
+        "submit",
+    ]
+    .into_iter()
+    .find(|known| *known == action)
 }
 
 /// The model-facing name of a catalog tool; wire endpoint names stay unchanged.

@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use nucleus_projects_interface::Dir;
-use nucleus_protocol::{Error, ErrorCode, IdentityRequest, Payload};
+use nucleus_protocol::{Error, IdentityRequest, Payload};
 use nucleus_sdk::{ChannelError, Dispatch};
 use nucleus_shell_interface::{ExecRequest, ExecResponse};
 use nucleus_swarm_interface::{MemberState, StartRequest, StartResponse, SwarmRecord};
@@ -29,36 +29,6 @@ impl Service {
             Ok(start) => start,
             Err(e) => return Ok(Err(e)),
         };
-        if let Some(id) = self.latest.get(&(project.clone(), session.clone()))
-            && self.swarms.get(id).is_some_and(Swarm::running)
-        {
-            return Ok(Err(invalid(format!("swarm {id} of this session still runs: stop it first"))));
-        }
-        if self.starting.values().any(|s| s.project == project && s.session == session) {
-            return Ok(Err(invalid("a swarm of this session is starting")));
-        }
-        let busy: Vec<String> = self
-            .swarms
-            .values()
-            .filter(|s| s.running())
-            .map(|s| format!("{} (project {}, session {})", s.id, s.project, s.session))
-            .chain(
-                self.starting
-                    .values()
-                    .map(|s| format!("{} (project {}, session {}, starting)", s.id, s.project, s.session)),
-            )
-            .collect();
-        if busy.len() >= self.options.max_swarms {
-            return Ok(Err(Error::new(
-                ErrorCode::LimitExceeded,
-                format!(
-                    "at most {} swarms run in this VM at once, and these do: {}. The agent of the session that \
-                     started one stops it with ultramath_stop; or wait for one to end",
-                    self.options.max_swarms,
-                    busy.join(", ")
-                ),
-            )));
-        }
         let wanted = start.model.clone().unwrap_or_else(|| self.options.models[0].clone());
         let Some(model) = self.authority.models.iter().find(|(id, _, _)| *id == wanted).cloned() else {
             let offered: Vec<&str> = self.authority.models.iter().map(|(id, _, _)| id.as_str()).collect();
@@ -178,6 +148,7 @@ impl Service {
             budget,
             reserved: 0,
             checks: 0,
+            carried: 0,
             deadline: Instant::now() + Duration::from_secs(minutes * 60),
             deadline_at_ms: now_ms() + minutes * 60_000,
             phase: Phase::Running,

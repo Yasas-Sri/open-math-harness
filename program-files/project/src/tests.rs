@@ -245,6 +245,44 @@ fn a_folder_of_any_size_is_listed_page_by_page() {
 }
 
 #[test]
+fn file_listing_reports_inode_creation_time_without_following_links() {
+    use nucleus_projects_interface::Listing;
+    use std::time::UNIX_EPOCH;
+
+    let f = Fixture::new();
+    f.call("init", &[], json!({})).unwrap();
+    let repo = f.home().join("repo");
+    std::fs::write(repo.join("proof.lean"), "proof").unwrap();
+    std::fs::File::open(repo.join("proof.lean"))
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(123)))
+        .unwrap();
+    let outside = f.dir.path().join("outside.txt");
+    std::fs::write(&outside, "outside target").unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("link")).unwrap();
+
+    let listing: Listing =
+        serde_json::from_value(f.call("list", &["repo"], json!({"path": ""})).unwrap()).unwrap();
+    for name in ["proof.lean", "link"] {
+        let entry = listing.entries.iter().find(|entry| entry.name == name).unwrap();
+        let metadata = std::fs::symlink_metadata(repo.join(name)).unwrap();
+        let expected = metadata
+            .created()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|time| u64::try_from(time.as_millis()).unwrap());
+        assert_eq!(entry.created, expected, "{name}: only the inode's reported birth time is returned");
+        assert_eq!(entry.size, metadata.len(), "{name}: the link's own metadata, not its target's");
+    }
+    let file = listing.entries.iter().find(|entry| entry.name == "proof.lean").unwrap();
+    assert_eq!(file.modified, 123_000);
+    assert_eq!(
+        listing.entries.iter().find(|entry| entry.name == "link").unwrap().kind,
+        nucleus_projects_interface::Kind::Link
+    );
+}
+
+#[test]
 fn repository_urls_are_public_https_only() {
     assert!(check_url("https://github.com/leanprover-community/mathlib4.git").is_ok());
     for bad in [

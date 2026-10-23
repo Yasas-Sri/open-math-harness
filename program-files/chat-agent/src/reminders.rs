@@ -22,7 +22,7 @@
 //! source and marks the text as untrusted, never as the person's words.
 
 use nucleus_conversation_interface::{self as conversation, ReceiveResponse};
-use nucleus_model_interface::ToolSpec;
+use nucleus_model_interface::{ReasoningMode, ToolSpec};
 use nucleus_protocol::{Error, ErrorCode, ResourcePath};
 use nucleus_sdk::ChannelError;
 use serde_json::Value;
@@ -97,20 +97,31 @@ pub(crate) fn call(
 /// inside the frame that says it is untrusted data from its source, not the
 /// person. Once more than one person has written in the session (`authors`,
 /// which this adds to), each message begins with the line naming its author.
+/// Each author's delivered mode is tracked here, also during history replay. Only
+/// their first message switching Ultramath off carries the explicit stop instruction;
+/// reminders and later standard messages do not repeat it. No new log format is needed:
+/// replay derives the same instruction from delivered messages' saved settings.
 /// `None` when it returned nothing.
 pub(crate) fn queued_prompt<E>(
     received: ReceiveResponse,
-    authors: &mut std::collections::BTreeSet<Option<String>>,
+    authors: &mut std::collections::BTreeMap<Option<String>, ReasoningMode>,
     mut prompt: impl FnMut(conversation::UserMessage) -> Result<String, E>,
 ) -> Result<Option<String>, E> {
     let ReceiveResponse { message, rest, reminders } = received;
     let messages: Vec<conversation::UserMessage> = message.into_iter().chain(rest).collect();
-    authors.extend(messages.iter().map(|m| m.author.clone()));
+    for message in &messages {
+        authors.entry(message.author.clone()).or_default();
+    }
     let several = authors.len() > 1;
     let mut parts = Vec::with_capacity(messages.len() + reminders.len());
     for message in messages {
         let line = several.then(|| crate::author_line(message.author.as_deref()));
-        let text = prompt(message)?;
+        let mode = message.settings.as_ref().and_then(|s| s.reasoning_mode).unwrap_or_default();
+        let previous = authors.insert(message.author.clone(), mode).unwrap_or_default();
+        let mut text = prompt(message)?;
+        if previous == ReasoningMode::Ultramath && mode == ReasoningMode::Standard {
+            text.push_str("\n\n[The user has explicitly requested turning off Ultramath. Stop any active Ultramath run with ultramath_stop and continue without Ultramath. Do not start or resume Ultramath unless the user explicitly requests it again or re-enables Ultramath mode.]");
+        }
         parts.push(match line {
             Some(line) => format!("{line}\n{text}"),
             None => text,
@@ -127,7 +138,7 @@ mod tests {
     /// The prompt of messages without files: their text and inline attachments.
     fn queued_prompt(
         received: ReceiveResponse,
-        authors: &mut std::collections::BTreeSet<Option<String>>,
+        authors: &mut std::collections::BTreeMap<Option<String>, ReasoningMode>,
     ) -> Option<String> {
         let inline = |message: conversation::UserMessage| {
             Ok::<_, std::convert::Infallible>(crate::attachments::inline(&message))
@@ -154,7 +165,7 @@ mod tests {
     fn queued_messages_and_due_reminders_are_one_prompt_in_order() {
         let message = |text: &str| from(None, text);
         let received = |message, rest, reminders| ReceiveResponse { message, rest, reminders };
-        let mut authors = std::collections::BTreeSet::new();
+        let mut authors = std::collections::BTreeMap::new();
         let mut queued_prompt = |received| queued_prompt(received, &mut authors);
         assert_eq!(
             queued_prompt(received(Some(message("one")), vec![message("two"), message("three")], vec![])),
@@ -186,7 +197,7 @@ mod tests {
     #[test]
     fn messages_name_their_authors_once_several_people_have_written() {
         let received = |message, rest| ReceiveResponse { message, rest, reminders: vec![] };
-        let mut authors = std::collections::BTreeSet::new();
+        let mut authors = std::collections::BTreeMap::new();
         assert_eq!(
             queued_prompt(received(Some(from(Some("Ada"), "hi")), vec![]), &mut authors),
             Some("hi".into())

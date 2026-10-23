@@ -14,7 +14,7 @@
 //! - `web`, when the service holds it;
 //! - the member actions of `swarm` on its own slot `[project, session, swarm,
 //!   member]`, and none of the session agent's (`start`, `status`, `verdict`,
-//!   `stop`, `records`).
+//!   `stop`, `resume`, `records`).
 //!
 //! Every grant expires at the swarm's deadline. Nothing here is trusted to
 //! hold that line: the kernel refuses a grant wider than the service holds,
@@ -306,6 +306,27 @@ pub fn dead_task(direction: &str, reason: &str, steps: u32, minutes_left: u64) -
          different direction with ultramath_register before anything else. This run may make at most {steps} model \
          calls, and the swarm stops in about {minutes_left} minutes.",
         quoted(reason)
+    )
+}
+
+/// The task of a member started again on its transcript when its swarm is
+/// resumed after a restart: `holding`, the direction it still holds, and
+/// `task`, the swarm's problem as [`first_task`] gives it (bounded as the
+/// swarm's start was), in case its transcript lost its first message.
+pub fn resume_task(holding: Option<&str>, steps: u32, minutes_left: u64, task: &str) -> String {
+    let direction = match holding {
+        Some(direction) => format!("You still hold direction {direction}: go on with it."),
+        None => "You hold no direction: read the board with ultramath_board and register one with \
+                 ultramath_register before anything else."
+            .to_owned(),
+    };
+    format!(
+        "The swarm was interrupted (the VM's runtime restarted) and is resumed: your work goes on from where your \
+         transcript ends. A tool call that had not returned when it stopped has a result saying so: whether it took \
+         effect is unknown, so check before you run it again. If you were submitting when the swarm stopped, \
+         submit again; the judge may see your report twice. {direction} Read the board with ultramath_board: the \
+         others may have found something meanwhile. This run may make at most {steps} model calls, and the swarm \
+         stops in about {minutes_left} minutes.\n\nThe problem:\n\n{task}"
     )
 }
 

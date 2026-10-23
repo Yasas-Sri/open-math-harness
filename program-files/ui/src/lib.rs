@@ -64,7 +64,7 @@
 //! one call of `background` on `[project, session]`, with the connection's
 //! label as the `author` the job names, as for `say`.
 //!
-//! `swarm.status {project?, session}` and `swarm.records {project?, session,
+//! `swarm.status {project?, session, swarm?}` and `swarm.records {project?, session,
 //! swarm?, after?, limit?}` read a session's swarms for the
 //! window's read-only card: one call of the swarm service's `status` or
 //! `records` on `[project, session]`, with the interface's payload, answered
@@ -389,12 +389,16 @@ pub enum Operation {
         #[serde(skip)]
         author: Option<String>,
     },
-    /// The session's latest swarm as its service sees it now.
+    /// One of the session's swarms as its service sees it now: `swarm`, or its
+    /// running one (the newest when several run), or its latest; with the ids
+    /// of every running one.
     #[serde(rename = "swarm.status")]
     SwarmStatus {
         #[serde(default)]
         project: Option<String>,
         session: String,
+        #[serde(default)]
+        swarm: Option<String>,
     },
     /// One page of a swarm's records: `swarm` one of the session's swarms
     /// (its latest when absent), from `after`, at most `limit`.
@@ -728,12 +732,11 @@ pub fn route(operation: Operation) -> Result<Option<Route>, Error> {
             session_of(project, session)?,
             json!(jobs::BackgroundRequest { call, author }),
         ),
-        Operation::SwarmStatus { project, session } => (
-            swarm::ENDPOINT,
-            swarm::ACTION_STATUS,
-            session_of(project, session)?,
-            json!(swarm::StatusRequest::default()),
-        ),
+        Operation::SwarmStatus { project, session, swarm: id } => {
+            let request = swarm::StatusRequest { swarm: id, direction: None };
+            request.validate()?;
+            (swarm::ENDPOINT, swarm::ACTION_STATUS, session_of(project, session)?, json!(request))
+        }
         Operation::SwarmRecords { project, session, swarm: id, after, limit } => {
             let request = swarm::RecordsRequest { swarm: id, after, limit };
             request.validate()?;
